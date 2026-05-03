@@ -1,3 +1,4 @@
+mod db8_document;
 mod editor;
 mod project_tree;
 mod theme;
@@ -14,7 +15,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| DebateEditor::new()),
+            |_, cx| cx.new(DebateEditor::new),
         )
         .expect("failed to open GPUI window");
 
