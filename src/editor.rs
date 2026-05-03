@@ -191,20 +191,9 @@ impl DebateEditor {
         cx.notify();
     }
 
-    fn focus_raw_editor(
-        &mut self,
-        _event: &gpui::ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.move_raw_cursor_to_document_end();
-        window.focus(&self.raw_editor_focus);
-        cx.notify();
-    }
-
     fn start_raw_document_mouse_selection(
         &mut self,
-        _event: &MouseDownEvent,
+        event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -212,7 +201,7 @@ impl DebateEditor {
             return;
         };
 
-        let end = document.raw.len();
+        let end = raw_document_mouse_offset(&document.raw, f32::from(event.position.y));
         self.raw_mouse_selecting = false;
         self.raw_mouse_anchor = Some(end);
         self.raw_selection = None;
@@ -223,47 +212,7 @@ impl DebateEditor {
 
     fn update_raw_document_mouse_selection(
         &mut self,
-        _event: &MouseMoveEvent,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-    }
-
-    fn move_raw_cursor_to_document_end(&mut self) {
-        if let Some(document) = self.opened_document.as_ref() {
-            self.raw_cursor = raw_offset_to_cursor(&document.raw, document.raw.len());
-            self.raw_selection = None;
-            self.raw_mouse_selecting = false;
-            self.raw_mouse_anchor = None;
-        }
-    }
-
-    fn start_raw_mouse_selection(
-        &mut self,
-        line: usize,
-        _event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(document) = self.opened_document.as_ref() else {
-            return;
-        };
-
-        let anchor = raw_line_start_offset(&document.raw, line);
-        let head = raw_line_select_end_offset(&document.raw, line);
-
-        self.raw_mouse_selecting = false;
-        self.raw_mouse_anchor = Some(anchor);
-        self.raw_selection = None;
-        self.raw_cursor = raw_offset_to_cursor(&document.raw, head);
-        window.focus(&self.raw_editor_focus);
-        cx.notify();
-    }
-
-    fn update_raw_mouse_selection(
-        &mut self,
-        line: usize,
-        _event: &MouseMoveEvent,
+        event: &MouseMoveEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -275,11 +224,64 @@ impl DebateEditor {
             return;
         };
 
-        if raw_line_start_offset(&document.raw, line) == anchor {
+        let head = raw_document_mouse_offset(&document.raw, f32::from(event.position.y));
+        if anchor == head {
             return;
         }
 
-        let head = raw_line_select_end_offset(&document.raw, line);
+        self.raw_mouse_selecting = true;
+        self.raw_selection = Some(RawSelection { anchor, head });
+        self.raw_cursor = raw_offset_to_cursor(&document.raw, head);
+        cx.notify();
+    }
+
+    fn start_raw_mouse_selection(
+        &mut self,
+        line: usize,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(document) = self.opened_document.as_ref() else {
+            return;
+        };
+
+        let anchor = raw_line_mouse_offset(
+            &document.raw,
+            line,
+            f32::from(event.position.x),
+            self.sidebar_open,
+        );
+
+        self.raw_mouse_selecting = false;
+        self.raw_mouse_anchor = Some(anchor);
+        self.raw_selection = None;
+        self.raw_cursor = raw_offset_to_cursor(&document.raw, anchor);
+        window.focus(&self.raw_editor_focus);
+        cx.notify();
+    }
+
+    fn update_raw_mouse_selection(
+        &mut self,
+        line: usize,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(anchor) = self.raw_mouse_anchor else {
+            return;
+        };
+
+        let Some(document) = self.opened_document.as_ref() else {
+            return;
+        };
+
+        let head = raw_line_mouse_offset(
+            &document.raw,
+            line,
+            f32::from(event.position.x),
+            self.sidebar_open,
+        );
         if anchor == head {
             return;
         }
@@ -400,7 +402,7 @@ impl DebateEditor {
         let mut lines = self.raw_lines();
         ensure_line(&mut lines, self.raw_cursor.line);
         let line = &mut lines[self.raw_cursor.line];
-        let column = self.raw_cursor.column.min(line.len());
+        let column = clamp_to_char_boundary(line, self.raw_cursor.column);
         line.insert_str(column, text);
         self.raw_cursor.column = column + text.len();
         self.update_raw_lines(lines);
@@ -453,7 +455,7 @@ impl DebateEditor {
         let mut lines = self.raw_lines();
         ensure_line(&mut lines, self.raw_cursor.line);
         let line = &mut lines[self.raw_cursor.line];
-        let column = self.raw_cursor.column.min(line.len());
+        let column = clamp_to_char_boundary(line, self.raw_cursor.column);
         let remainder = line.split_off(column);
         lines.insert(self.raw_cursor.line + 1, remainder);
         self.raw_cursor.line += 1;
@@ -472,9 +474,10 @@ impl DebateEditor {
 
         if self.raw_cursor.column > 0 {
             let line = &mut lines[self.raw_cursor.line];
-            let column = self.raw_cursor.column.min(line.len());
-            line.remove(column - 1);
-            self.raw_cursor.column = column - 1;
+            let column = clamp_to_char_boundary(line, self.raw_cursor.column);
+            let previous_column = previous_char_boundary(line, column);
+            line.replace_range(previous_column..column, "");
+            self.raw_cursor.column = previous_column;
         } else if self.raw_cursor.line > 0 {
             let removed = lines.remove(self.raw_cursor.line);
             self.raw_cursor.line -= 1;
@@ -498,7 +501,10 @@ impl DebateEditor {
         let line_len = lines[self.raw_cursor.line].len();
 
         if self.raw_cursor.column < line_len {
-            lines[self.raw_cursor.line].remove(self.raw_cursor.column);
+            let line = &mut lines[self.raw_cursor.line];
+            let column = clamp_to_char_boundary(line, self.raw_cursor.column);
+            let next_column = next_char_boundary(line, column);
+            line.replace_range(column..next_column, "");
         } else if self.raw_cursor.line + 1 < lines.len() {
             let next = lines.remove(self.raw_cursor.line + 1);
             lines[self.raw_cursor.line].push_str(&next);
@@ -513,7 +519,9 @@ impl DebateEditor {
     fn raw_move_left(&mut self, selecting: bool) {
         let old_offset = self.raw_cursor_offset();
         if self.raw_cursor.column > 0 {
-            self.raw_cursor.column -= 1;
+            if let Some(line) = self.raw_lines().get(self.raw_cursor.line) {
+                self.raw_cursor.column = previous_char_boundary(line, self.raw_cursor.column);
+            }
         } else if self.raw_cursor.line > 0 {
             self.raw_cursor.line -= 1;
             self.raw_cursor.column = self
@@ -530,7 +538,9 @@ impl DebateEditor {
         let line_len = lines.get(self.raw_cursor.line).map_or(0, String::len);
 
         if self.raw_cursor.column < line_len {
-            self.raw_cursor.column += 1;
+            if let Some(line) = lines.get(self.raw_cursor.line) {
+                self.raw_cursor.column = next_char_boundary(line, self.raw_cursor.column);
+            }
         } else if self.raw_cursor.line + 1 < lines.len() {
             self.raw_cursor.line += 1;
             self.raw_cursor.column = 0;
@@ -924,15 +934,15 @@ impl DebateEditor {
         div()
             .id("raw-editor")
             .size_full()
-            .p_4()
+            .pt_4()
+            .pb_4()
             .flex()
             .flex_col()
             .track_focus(&self.raw_editor_focus)
-            .font_family("monospace")
+            .font_family("DejaVu Sans Mono")
             .text_size(px(13.0))
             .text_color(colors.text)
             .cursor_pointer()
-            .on_click(cx.listener(Self::focus_raw_editor))
             .children(
                 split_raw_lines(&document.raw)
                     .into_iter()
@@ -987,15 +997,17 @@ impl DebateEditor {
                     None
                 }
             });
-        let column = self.raw_cursor.column.min(line.len());
+        let column = clamp_to_char_boundary(&line, self.raw_cursor.column);
 
         div()
             .id(("raw-line", index))
+            .w_full()
+            .px_4()
             .min_h(px(22.0))
             .flex()
             .items_center()
             .whitespace_nowrap()
-            .hover(|this| this.bg(colors.surface_elevated))
+            .when(is_cursor_line, |this| this.bg(colors.surface_elevated))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event, window, cx| {
@@ -1161,6 +1173,34 @@ fn raw_offset_to_cursor(raw: &str, offset: usize) -> RawCursor {
     }
 }
 
+fn clamp_to_char_boundary(text: &str, column: usize) -> usize {
+    let mut column = column.min(text.len());
+    while column > 0 && !text.is_char_boundary(column) {
+        column -= 1;
+    }
+    column
+}
+
+fn previous_char_boundary(text: &str, column: usize) -> usize {
+    let column = clamp_to_char_boundary(text, column);
+    text[..column]
+        .char_indices()
+        .last()
+        .map_or(0, |(index, _)| index)
+}
+
+fn next_char_boundary(text: &str, column: usize) -> usize {
+    let column = clamp_to_char_boundary(text, column);
+    if column >= text.len() {
+        text.len()
+    } else {
+        text[column..]
+            .char_indices()
+            .nth(1)
+            .map_or(text.len(), |(offset, _)| column + offset)
+    }
+}
+
 fn raw_line_start_offset(raw: &str, target_line: usize) -> usize {
     let mut offset = 0;
 
@@ -1175,15 +1215,43 @@ fn raw_line_start_offset(raw: &str, target_line: usize) -> usize {
     raw.len()
 }
 
-fn raw_line_select_end_offset(raw: &str, target_line: usize) -> usize {
-    let line_start = raw_line_start_offset(raw, target_line);
-    let line = raw.split('\n').nth(target_line).unwrap_or_default();
-    let line_end = line_start + line.len();
+fn raw_line_mouse_offset(raw: &str, target_line: usize, mouse_x: f32, sidebar_open: bool) -> usize {
+    const RAW_EDITOR_PADDING_X: f32 = 16.0;
+    const RAW_LINE_NUMBER_WIDTH: f32 = 48.0;
+    const SIDEBAR_WIDTH: f32 = 240.0;
 
-    if line_end < raw.len() {
-        line_end + 1
+    let document_left = if sidebar_open { SIDEBAR_WIDTH } else { 0.0 };
+    let text_left = document_left + RAW_EDITOR_PADDING_X + RAW_LINE_NUMBER_WIDTH;
+    let target_char = ((mouse_x - text_left) / RAW_EDITOR_CHAR_WIDTH)
+        .round()
+        .max(0.0) as usize;
+    let line_start = raw_line_start_offset(raw, target_line);
+    let line = raw.split('\n').nth(target_line).unwrap_or("");
+    let line_char_count = line.chars().count();
+    let column = char_index_to_byte_offset(line, target_char.min(line_char_count));
+
+    line_start + column
+}
+
+fn raw_document_mouse_offset(raw: &str, mouse_y: f32) -> usize {
+    const APP_HEADER_HEIGHT: f32 = 40.0;
+    const DOCUMENT_TOOLBAR_HEIGHT: f32 = 40.0;
+    const RAW_EDITOR_PADDING_Y: f32 = 16.0;
+    const RAW_LINE_HEIGHT: f32 = 22.0;
+
+    let line_count = raw.split('\n').count().max(1);
+    let raw_top = APP_HEADER_HEIGHT + DOCUMENT_TOOLBAR_HEIGHT + RAW_EDITOR_PADDING_Y;
+    let relative_y = mouse_y - raw_top;
+
+    if relative_y <= 0.0 {
+        return 0;
+    }
+
+    let line = (relative_y / RAW_LINE_HEIGHT).floor() as usize;
+    if line >= line_count {
+        raw.len()
     } else {
-        line_end
+        raw_line_start_offset(raw, line)
     }
 }
 
@@ -1205,21 +1273,13 @@ fn render_raw_line_segments(
             colors,
         );
         push_raw_text_segment(&mut segments, &line[selection_end..], false, colors);
-    } else {
+    } else if show_cursor {
+        let cursor_column = clamp_to_char_boundary(line, cursor_column);
         push_raw_text_segment(&mut segments, &line[..cursor_column], false, colors);
-
-        if show_cursor {
-            segments.push(
-                div()
-                    .flex_none()
-                    .w(px(1.0))
-                    .h(px(16.0))
-                    .bg(colors.accent)
-                    .into_any_element(),
-            );
-        }
-
+        segments.push(raw_cursor_element(colors).into_any_element());
         push_raw_text_segment(&mut segments, &line[cursor_column..], false, colors);
+    } else {
+        push_raw_text_segment(&mut segments, line, false, colors);
     }
 
     if segments.is_empty() {
@@ -1227,6 +1287,12 @@ fn render_raw_line_segments(
     }
 
     segments
+}
+
+const RAW_EDITOR_CHAR_WIDTH: f32 = 7.8;
+
+fn raw_cursor_element(colors: AppColors) -> gpui::Div {
+    div().flex_none().w(px(2.0)).h(px(16.0)).bg(colors.accent)
 }
 
 fn push_raw_text_segment(
@@ -1245,6 +1311,16 @@ fn push_raw_text_segment(
             .child(text.to_string())
             .into_any_element(),
     );
+}
+
+fn char_index_to_byte_offset(text: &str, char_index: usize) -> usize {
+    if char_index == 0 {
+        0
+    } else {
+        text.char_indices()
+            .nth(char_index)
+            .map_or(text.len(), |(offset, _)| offset)
+    }
 }
 
 fn ensure_line(lines: &mut Vec<String>, line: usize) {
@@ -1300,7 +1376,7 @@ impl Render for DebateEditor {
                                     .on_click(cx.listener(Self::toggle_sidebar))
                                     .child(if self.sidebar_open { "◧" } else { "◨" }),
                             )
-                            .child("DebatEditor"),
+                            .child("Doxedit"),
                     )
                     .child(
                         div()
