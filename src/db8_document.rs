@@ -76,16 +76,22 @@ impl StyleSet {
 
 impl Db8Document {
     pub fn parse(raw: &str) -> Self {
-        Self {
-            blocks: raw
-                .lines()
+        let blocks = if raw.is_empty() {
+            vec![Db8Block {
+                source_line: 0,
+                spans: parse_spans(""),
+            }]
+        } else {
+            raw.split('\n')
                 .enumerate()
                 .map(|(line_index, line)| Db8Block {
                     source_line: line_index,
                     spans: parse_spans(line),
                 })
-                .collect(),
-        }
+                .collect()
+        };
+
+        Self { blocks }
     }
 
     pub fn to_db8(&self) -> String {
