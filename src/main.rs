@@ -1,4 +1,5 @@
 mod db8_document;
+mod db8_style;
 mod editor;
 mod project_tree;
 mod theme;

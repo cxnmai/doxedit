@@ -1,0 +1,58 @@
+{
+  "page": {
+    "width": "8.5in",
+    "marginLeft": "1in",
+    "marginRight": "1in"
+  },
+  "body": {
+    "fontFamily": "Times New Roman",
+    "fontSizePt": 12.0,
+    "lineHeight": 1.15
+  },
+  "pocket": {
+    "fontSizePt": 16.0,
+    "fontWeight": 700,
+    "spacingBeforePt": 12.0,
+    "spacingAfterPt": 8.0
+  },
+  "hat": {
+    "fontSizePt": 14.0,
+    "fontWeight": 700,
+    "textColor": "#111111",
+    "spacingBeforePt": 8.0,
+    "spacingAfterPt": 4.0
+  },
+  "block": {
+    "spacingAfterPt": 10.0
+  },
+  "tag": {
+    "fontFamily": "Times New Roman",
+    "fontSizePt": 12.0,
+    "fontWeight": 700,
+    "textColor": "#000000"
+  },
+  "cite": {
+    "fontSizePt": 10.0,
+    "italic": true,
+    "textColor": "#333333"
+  },
+  "normal": {
+    "fontSizePt": 12.0,
+    "textColor": "#000000"
+  },
+  "highlight": {
+    "background": "#fff176",
+    "textColor": "#000000"
+  },
+  "emphasis": {
+    "fontWeight": 700
+  },
+  "underline": {
+    "color": "#000000",
+    "thicknessPx": 1
+  },
+  "shrunk": {
+    "fontSizeScale": 0.82,
+    "lineHeight": 1.0
+  }
+}

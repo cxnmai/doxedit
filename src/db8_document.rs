@@ -22,10 +22,56 @@ pub struct StyleSet {
     pub block: bool,
     pub tag: bool,
     pub cite: bool,
-    pub bold: bool,
+    pub emphasis: bool,
     pub underline: bool,
-    pub small: bool,
+    pub shrunk: bool,
     pub highlight: bool,
+}
+
+impl StyleSet {
+    pub fn is_plain(self) -> bool {
+        !self.pocket
+            && !self.hat
+            && !self.block
+            && !self.tag
+            && !self.cite
+            && !self.emphasis
+            && !self.underline
+            && !self.shrunk
+            && !self.highlight
+    }
+
+    pub fn tokens(self) -> Vec<&'static str> {
+        let mut tokens = Vec::new();
+        if self.pocket {
+            tokens.push("pocket");
+        }
+        if self.hat {
+            tokens.push("hat");
+        }
+        if self.block {
+            tokens.push("block");
+        }
+        if self.tag {
+            tokens.push("tag");
+        }
+        if self.cite {
+            tokens.push("cite");
+        }
+        if self.emphasis {
+            tokens.push("emphasis");
+        }
+        if self.underline {
+            tokens.push("underline");
+        }
+        if self.shrunk {
+            tokens.push("shrunk");
+        }
+        if self.highlight {
+            tokens.push("highlight");
+        }
+        tokens
+    }
 }
 
 impl Db8Document {
@@ -41,6 +87,29 @@ impl Db8Document {
                 .collect(),
         }
     }
+
+    pub fn to_db8(&self) -> String {
+        self.blocks
+            .iter()
+            .map(|block| serialize_spans(&block.spans))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn serialize_spans(spans: &[Db8Span]) -> String {
+    spans
+        .iter()
+        .map(|span| {
+            if span.styles.is_plain() {
+                span.text.clone()
+            } else {
+                let style_tokens = span.styles.tokens().join(" ");
+                format!("[{}: {}]", style_tokens, span.text)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn parse_spans(line: &str) -> Vec<Db8Span> {
@@ -103,9 +172,9 @@ fn parse_styles(style_part: &str) -> StyleSet {
             "block" => styles.block = true,
             "tag" => styles.tag = true,
             "cite" => styles.cite = true,
-            "bold" => styles.bold = true,
+            "bold" | "emphasis" => styles.emphasis = true,
             "underline" | "underlined" => styles.underline = true,
-            "small" | "shrunk" => styles.small = true,
+            "small" | "shrunk" => styles.shrunk = true,
             "highlight" | "highlighted" => styles.highlight = true,
             _ => {}
         }
@@ -121,17 +190,31 @@ mod tests {
     #[test]
     fn parses_composable_inline_styles() {
         let document = Db8Document::parse(
-            "Normal [bold underline cite: Smith 24] and [highlight small: key text]",
+            "Normal [emphasis underline cite: Smith 24] and [highlight shrunk: key text]",
         );
 
         let block = &document.blocks[0];
         assert_eq!(block.spans.len(), 4);
         assert_eq!(block.spans[1].text, "Smith 24");
-        assert!(block.spans[1].styles.bold);
+        assert!(block.spans[1].styles.emphasis);
         assert!(block.spans[1].styles.underline);
         assert!(block.spans[1].styles.cite);
         assert_eq!(block.spans[3].text, "key text");
         assert!(block.spans[3].styles.highlight);
-        assert!(block.spans[3].styles.small);
+        assert!(block.spans[3].styles.shrunk);
+    }
+
+    #[test]
+    fn supports_legacy_alias_tokens() {
+        let document = Db8Document::parse("[bold small: Alias handling]");
+        let span = &document.blocks[0].spans[0];
+        assert!(span.styles.emphasis);
+        assert!(span.styles.shrunk);
+    }
+
+    #[test]
+    fn serializes_back_to_db8_line_syntax() {
+        let document = Db8Document::parse("A [tag emphasis: claim] line");
+        assert_eq!(document.to_db8(), "A [tag emphasis: claim] line");
     }
 }
