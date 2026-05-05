@@ -1,5 +1,5 @@
 use crate::{
-    db8_document::{Db8Block, Db8Document, Db8Span, StyleSet},
+    db8_document::{BlockStyle, Db8Block, Db8Document, Db8Span, StyleSet},
     db8_style::{
         Db8StyleConfig, db8_document_to_typst, load_or_create_style_config, save_style_config,
         style_config_to_css,
@@ -50,15 +50,6 @@ pub struct DebateEditor {
 enum DocumentViewMode {
     Raw,
     Render,
-}
-
-impl DocumentViewMode {
-    fn id(self) -> usize {
-        match self {
-            Self::Raw => 0,
-            Self::Render => 1,
-        }
-    }
 }
 
 struct OpenedDocument {
@@ -240,8 +231,9 @@ impl DebateEditor {
     }
 
     fn select_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let raw = std::fs::read_to_string(&path).unwrap_or_else(|_| String::new());
-        let parsed = Db8Document::parse(&raw);
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let parsed = Db8Document::from_bytes(&bytes);
+        let raw = parsed.to_db8();
 
         self.selected_file = Some(path.clone());
         self.opened_document = Some(OpenedDocument { path, raw, parsed });
@@ -255,11 +247,6 @@ impl DebateEditor {
         self.render_mouse_anchor = None;
         self.render_active_styles = StyleSet::default();
         self.export_status = None;
-        cx.notify();
-    }
-
-    fn set_document_view_mode(&mut self, mode: DocumentViewMode, cx: &mut Context<Self>) {
-        self.document_view_mode = mode;
         cx.notify();
     }
 
@@ -816,7 +803,7 @@ impl DebateEditor {
 
     fn autosave_raw_document(&self) {
         if let Some(document) = self.opened_document.as_ref() {
-            let _ = std::fs::write(&document.path, &document.raw);
+            let _ = std::fs::write(&document.path, document.parsed.to_bytes());
         }
     }
 
@@ -1149,6 +1136,7 @@ impl DebateEditor {
             line_index + 1,
             Db8Block {
                 source_line: line_index + 1,
+                style: current_block.style,
                 spans: right_spans,
             },
         );
@@ -1355,14 +1343,14 @@ impl DebateEditor {
             return false;
         };
 
-        block.spans.iter().any(|span| match style_token {
-            "pocket" => span.styles.pocket,
-            "hat" => span.styles.hat,
-            "block" => span.styles.block,
-            "tag" => span.styles.tag,
-            "cite" => span.styles.cite,
+        match style_token {
+            "pocket" => block.style == BlockStyle::Pocket,
+            "hat" => block.style == BlockStyle::Hat,
+            "block" => block.style == BlockStyle::Block,
+            "tag" => block.style == BlockStyle::Tag,
+            "cite" => block.style == BlockStyle::Cite,
             _ => false,
-        })
+        }
     }
 
     fn apply_semantic_style_to_selection(&mut self, style_token: &str, cx: &mut Context<Self>) {
@@ -1430,34 +1418,25 @@ impl DebateEditor {
         };
 
         let mut has_visible_content = false;
+        block.style = match style_token {
+            "pocket" => BlockStyle::Pocket,
+            "hat" => BlockStyle::Hat,
+            "block" => BlockStyle::Block,
+            "tag" => BlockStyle::Tag,
+            "cite" => BlockStyle::Cite,
+            _ => BlockStyle::Normal,
+        };
         for span in &mut block.spans {
             if !span.text.trim().is_empty() {
                 has_visible_content = true;
             }
             clear_primary_semantic_styles(&mut span.styles);
-            match style_token {
-                "pocket" => span.styles.pocket = true,
-                "hat" => span.styles.hat = true,
-                "block" => span.styles.block = true,
-                "tag" => span.styles.tag = true,
-                "cite" => span.styles.cite = true,
-                _ => {}
-            }
         }
 
         if !has_visible_content {
-            let mut styles = StyleSet::default();
-            match style_token {
-                "pocket" => styles.pocket = true,
-                "hat" => styles.hat = true,
-                "block" => styles.block = true,
-                "tag" => styles.tag = true,
-                "cite" => styles.cite = true,
-                _ => {}
-            }
             block.spans = vec![crate::db8_document::Db8Span {
                 text: String::new(),
-                styles,
+                styles: StyleSet::default(),
             }];
         }
 
@@ -1551,6 +1530,14 @@ impl DebateEditor {
         window.focus(&self.render_editor_focus);
         self.render_active_styles = StyleSet::default();
         self.render_selection = None;
+        if let Some(document) = self.opened_document.as_mut()
+            && let Some(block) = document.parsed.blocks.get_mut(self.render_cursor.line)
+        {
+            block.style = BlockStyle::Normal;
+            document.raw = document.parsed.to_db8();
+            document.parsed = Db8Document::parse(&document.raw);
+            self.autosave_raw_document();
+        }
         cx.notify();
     }
 
@@ -2047,359 +2034,279 @@ impl DebateEditor {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .child(title),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
+            .child(div().flex_none().flex().items_center().gap_1().when(
+                self.document_view_mode == DocumentViewMode::Render,
+                |this| {
+                    this.child(
                         div()
+                            .id("render-style-normal")
+                            .h(px(26.0))
+                            .px_2()
                             .flex()
                             .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(if self.render_active_styles.is_plain() {
+                                colors.background
+                            } else {
+                                colors.surface_elevated
+                            })
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::apply_normal_style))
+                            .child("Normal"),
+                    )
+                    .child(
+                        div()
+                            .id("render-style-pocket")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(if self.line_has_style("pocket") {
+                                colors.background
+                            } else {
+                                colors.surface_elevated
+                            })
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::apply_pocket_style))
+                            .child("Pocket"),
+                    )
+                    .child(
+                        div()
+                            .id("render-style-hat")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(if self.line_has_style("hat") {
+                                colors.background
+                            } else {
+                                colors.surface_elevated
+                            })
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::apply_hat_style))
+                            .child("Hat"),
+                    )
+                    .child(
+                        div()
+                            .id("render-style-block")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(if self.line_has_style("block") {
+                                colors.background
+                            } else {
+                                colors.surface_elevated
+                            })
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::apply_block_style))
+                            .child("Block"),
+                    )
+                    .child(
+                        div()
+                            .id("render-style-tag")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(if self.line_has_style("tag") {
+                                colors.background
+                            } else {
+                                colors.surface_elevated
+                            })
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::apply_tag_style))
+                            .child("Tag"),
+                    )
+                    .child(
+                        div()
+                            .id("render-style-cite")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(if self.line_has_style("cite") {
+                                colors.background
+                            } else {
+                                colors.surface_elevated
+                            })
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::apply_cite_style))
+                            .child("Cite"),
+                    )
+                    .child(
+                        div()
+                            .id("render-style-highlight")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(if self.render_active_styles.highlight {
+                                colors.background
+                            } else {
+                                colors.surface_elevated
+                            })
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(Self::apply_highlight_style),
+                            )
+                            .child("H"),
+                    )
+                    .child(
+                        div()
+                            .id("render-style-emphasis")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(if self.render_active_styles.emphasis {
+                                colors.background
+                            } else {
+                                colors.surface_elevated
+                            })
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(Self::apply_emphasis_style),
+                            )
+                            .child("B"),
+                    )
+                    .child(
+                        div()
+                            .id("render-style-underline")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(if self.render_active_styles.underline {
+                                colors.background
+                            } else {
+                                colors.surface_elevated
+                            })
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(Self::apply_underline_style),
+                            )
+                            .child("U"),
+                    )
+                    .child(
+                        div()
+                            .id("render-style-shrunk")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(if self.render_active_styles.shrunk {
+                                colors.background
+                            } else {
+                                colors.surface_elevated
+                            })
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::apply_shrunk_style))
+                            .child("S"),
+                    )
+                    .child(
+                        div()
+                            .id("render-export-typ")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
                             .bg(colors.surface_elevated)
-                            .child(self.render_view_mode_button(
-                                "Raw",
-                                DocumentViewMode::Raw,
-                                colors,
-                                cx,
-                            ))
-                            .child(self.render_view_mode_button(
-                                "Render",
-                                DocumentViewMode::Render,
-                                colors,
-                                cx,
-                            )),
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(Self::export_typst_source),
+                            )
+                            .child(".typ"),
                     )
-                    .when(
-                        self.document_view_mode == DocumentViewMode::Render,
-                        |this| {
-                            this.child(
-                                div()
-                                    .id("render-style-normal")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(if self.render_active_styles.is_plain() {
-                                        colors.background
-                                    } else {
-                                        colors.surface_elevated
-                                    })
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::apply_normal_style),
-                                    )
-                                    .child("Normal"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-style-pocket")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(if self.line_has_style("pocket") {
-                                        colors.background
-                                    } else {
-                                        colors.surface_elevated
-                                    })
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::apply_pocket_style),
-                                    )
-                                    .child("Pocket"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-style-hat")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(if self.line_has_style("hat") {
-                                        colors.background
-                                    } else {
-                                        colors.surface_elevated
-                                    })
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::apply_hat_style),
-                                    )
-                                    .child("Hat"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-style-block")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(if self.line_has_style("block") {
-                                        colors.background
-                                    } else {
-                                        colors.surface_elevated
-                                    })
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::apply_block_style),
-                                    )
-                                    .child("Block"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-style-tag")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(if self.line_has_style("tag") {
-                                        colors.background
-                                    } else {
-                                        colors.surface_elevated
-                                    })
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::apply_tag_style),
-                                    )
-                                    .child("Tag"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-style-cite")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(if self.line_has_style("cite") {
-                                        colors.background
-                                    } else {
-                                        colors.surface_elevated
-                                    })
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::apply_cite_style),
-                                    )
-                                    .child("Cite"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-style-highlight")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(if self.render_active_styles.highlight {
-                                        colors.background
-                                    } else {
-                                        colors.surface_elevated
-                                    })
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::apply_highlight_style),
-                                    )
-                                    .child("H"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-style-emphasis")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(if self.render_active_styles.emphasis {
-                                        colors.background
-                                    } else {
-                                        colors.surface_elevated
-                                    })
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::apply_emphasis_style),
-                                    )
-                                    .child("B"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-style-underline")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(if self.render_active_styles.underline {
-                                        colors.background
-                                    } else {
-                                        colors.surface_elevated
-                                    })
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::apply_underline_style),
-                                    )
-                                    .child("U"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-style-shrunk")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(if self.render_active_styles.shrunk {
-                                        colors.background
-                                    } else {
-                                        colors.surface_elevated
-                                    })
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::apply_shrunk_style),
-                                    )
-                                    .child("S"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-export-typ")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(colors.surface_elevated)
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(Self::export_typst_source),
-                                    )
-                                    .child(".typ"),
-                            )
-                            .child(
-                                div()
-                                    .id("render-export-pdf")
-                                    .h(px(26.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(colors.surface_elevated)
-                                    .text_size(px(11.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(colors.background))
-                                    .on_mouse_down(MouseButton::Left, cx.listener(Self::export_pdf))
-                                    .child("PDF"),
-                            )
-                        },
-                    ),
-            )
-    }
-
-    fn render_view_mode_button(
-        &self,
-        label: &'static str,
-        mode: DocumentViewMode,
-        colors: AppColors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let selected = self.document_view_mode == mode;
-
-        div()
-            .id(("view-mode", mode.id()))
-            .h(px(26.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(12.0))
-            .text_color(if selected {
-                colors.text
-            } else {
-                colors.text_muted
-            })
-            .cursor_pointer()
-            .when(selected, |this| this.bg(colors.background))
-            .hover(|this| this.bg(colors.background))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_document_view_mode(mode, cx);
-            }))
-            .child(label)
+                    .child(
+                        div()
+                            .id("render-export-pdf")
+                            .h(px(26.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.surface_elevated)
+                            .text_size(px(11.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.background))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::export_pdf))
+                            .child("PDF"),
+                    )
+                },
+            ))
     }
 
     fn render_raw_document(
@@ -2978,6 +2885,7 @@ fn insert_rendered_text(
     if document.blocks.is_empty() {
         document.blocks.push(Db8Block {
             source_line: 0,
+            style: BlockStyle::Normal,
             spans: vec![Db8Span {
                 text: String::new(),
                 styles: StyleSet::default(),
@@ -3025,6 +2933,7 @@ fn insert_rendered_text(
             insert_at,
             Db8Block {
                 source_line: insert_at,
+                style: document.blocks[line].style,
                 spans: normalize_spans(vec![Db8Span {
                     text: (*middle).to_string(),
                     styles,
@@ -3047,6 +2956,7 @@ fn insert_rendered_text(
         insert_at,
         Db8Block {
             source_line: insert_at,
+            style: document.blocks[line].style,
             spans: normalize_spans(last_spans),
         },
     );
@@ -3273,12 +3183,13 @@ fn render_line_mouse_column(
     let mut x = 0.0f32;
 
     for span in &block.spans {
-        let font_px = rendered_span_font_size_px(span.styles, style_config);
-        let weight_factor = if span.styles.pocket
-            || span.styles.hat
-            || span.styles.block
-            || span.styles.tag
-            || span.styles.emphasis
+        let effective_styles = block_style_to_styles(block.style, span.styles);
+        let font_px = rendered_span_font_size_px(effective_styles, style_config);
+        let weight_factor = if effective_styles.pocket
+            || effective_styles.hat
+            || effective_styles.block
+            || effective_styles.tag
+            || effective_styles.emphasis
         {
             1.08
         } else {
@@ -3346,23 +3257,13 @@ fn clear_primary_semantic_styles(styles: &mut StyleSet) {
 }
 
 fn semantic_block_class(block: &Db8Block) -> &'static str {
-    let Some(first) = block.spans.first() else {
-        return "normal";
-    };
-    let styles = first.styles;
-
-    if styles.pocket {
-        "pocket"
-    } else if styles.hat {
-        "hat"
-    } else if styles.block {
-        "block"
-    } else if styles.tag {
-        "tag"
-    } else if styles.cite {
-        "cite"
-    } else {
-        "normal"
+    match block.style {
+        BlockStyle::Pocket => "pocket",
+        BlockStyle::Hat => "hat",
+        BlockStyle::Block => "block",
+        BlockStyle::Tag => "tag",
+        BlockStyle::Cite => "cite",
+        BlockStyle::Normal => "normal",
     }
 }
 
@@ -3379,6 +3280,7 @@ fn render_db8_line_segments(
     let mut cursor_inserted = false;
 
     for span in &block.spans {
+        let effective_styles = block_style_to_styles(block.style, span.styles);
         let span_len = span.text.len();
         let span_start = consumed;
         let span_end = consumed + span_len;
@@ -3393,7 +3295,7 @@ fn render_db8_line_segments(
             if !left.is_empty() {
                 segments.push(render_db8_text_segment(
                     left,
-                    span.styles,
+                    effective_styles,
                     false,
                     style_config,
                     colors,
@@ -3404,7 +3306,7 @@ fn render_db8_line_segments(
             if !right.is_empty() {
                 segments.push(render_db8_text_segment(
                     right,
-                    span.styles,
+                    effective_styles,
                     false,
                     style_config,
                     colors,
@@ -3418,7 +3320,7 @@ fn render_db8_line_segments(
                 if !span.text.is_empty() {
                     segments.push(render_db8_text_segment(
                         &span.text,
-                        span.styles,
+                        effective_styles,
                         false,
                         style_config,
                         colors,
@@ -3431,7 +3333,7 @@ fn render_db8_line_segments(
                 if !left.is_empty() {
                     segments.push(render_db8_text_segment(
                         left,
-                        span.styles,
+                        effective_styles,
                         false,
                         style_config,
                         colors,
@@ -3440,7 +3342,7 @@ fn render_db8_line_segments(
                 if !middle.is_empty() {
                     segments.push(render_db8_text_segment(
                         middle,
-                        span.styles,
+                        effective_styles,
                         true,
                         style_config,
                         colors,
@@ -3449,7 +3351,7 @@ fn render_db8_line_segments(
                 if !right.is_empty() {
                     segments.push(render_db8_text_segment(
                         right,
-                        span.styles,
+                        effective_styles,
                         false,
                         style_config,
                         colors,
@@ -3459,7 +3361,7 @@ fn render_db8_line_segments(
         } else if !span.text.is_empty() {
             segments.push(render_db8_text_segment(
                 &span.text,
-                span.styles,
+                effective_styles,
                 false,
                 style_config,
                 colors,
@@ -3478,6 +3380,18 @@ fn render_db8_line_segments(
     }
 
     segments
+}
+
+fn block_style_to_styles(block_style: BlockStyle, mut styles: StyleSet) -> StyleSet {
+    match block_style {
+        BlockStyle::Pocket => styles.pocket = true,
+        BlockStyle::Hat => styles.hat = true,
+        BlockStyle::Block => styles.block = true,
+        BlockStyle::Tag => styles.tag = true,
+        BlockStyle::Cite => styles.cite = true,
+        BlockStyle::Normal => {}
+    }
+    styles
 }
 
 fn render_db8_text_segment(

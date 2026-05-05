@@ -1,31 +1,68 @@
-#[derive(Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Db8Document {
+    #[serde(default = "default_version")]
+    pub version: u32,
     pub blocks: Vec<Db8Block>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Db8Block {
+    #[serde(default)]
     pub source_line: usize,
+    #[serde(default)]
+    pub style: BlockStyle,
     pub spans: Vec<Db8Span>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Db8Span {
     pub text: String,
+    #[serde(default)]
     pub styles: StyleSet,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlockStyle {
+    #[default]
+    Normal,
+    Pocket,
+    Hat,
+    Block,
+    Tag,
+    Cite,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StyleSet {
+    #[serde(default, skip_serializing_if = "is_false")]
     pub pocket: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub hat: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub block: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub tag: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub cite: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub emphasis: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub underline: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub shrunk: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub highlight: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn default_version() -> u32 {
+    1
 }
 
 impl StyleSet {
@@ -40,187 +77,47 @@ impl StyleSet {
             && !self.shrunk
             && !self.highlight
     }
-
-    pub fn tokens(self) -> Vec<&'static str> {
-        let mut tokens = Vec::new();
-        if self.pocket {
-            tokens.push("pocket");
-        }
-        if self.hat {
-            tokens.push("hat");
-        }
-        if self.block {
-            tokens.push("block");
-        }
-        if self.tag {
-            tokens.push("tag");
-        }
-        if self.cite {
-            tokens.push("cite");
-        }
-        if self.emphasis {
-            tokens.push("emphasis");
-        }
-        if self.underline {
-            tokens.push("underline");
-        }
-        if self.shrunk {
-            tokens.push("shrunk");
-        }
-        if self.highlight {
-            tokens.push("highlight");
-        }
-        tokens
-    }
 }
 
 impl Db8Document {
     pub fn parse(raw: &str) -> Self {
-        let blocks = if raw.is_empty() {
-            vec![Db8Block {
+        if raw.trim().is_empty() {
+            return Self::empty();
+        }
+
+        serde_json::from_str::<Db8Document>(raw).unwrap_or_else(|_| Self::empty())
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        if bytes.is_empty() {
+            return Self::empty();
+        }
+
+        rmp_serde::from_slice::<Db8Document>(bytes)
+            .or_else(|_| serde_json::from_slice::<Db8Document>(bytes))
+            .unwrap_or_else(|_| Self::empty())
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            version: 1,
+            blocks: vec![Db8Block {
                 source_line: 0,
-                spans: parse_spans(""),
-            }]
-        } else {
-            raw.split('\n')
-                .enumerate()
-                .map(|(line_index, line)| Db8Block {
-                    source_line: line_index,
-                    spans: parse_spans(line),
-                })
-                .collect()
-        };
-
-        Self { blocks }
-    }
-
-    pub fn to_db8(&self) -> String {
-        self.blocks
-            .iter()
-            .map(|block| serialize_spans(&block.spans))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-}
-
-fn serialize_spans(spans: &[Db8Span]) -> String {
-    spans
-        .iter()
-        .map(|span| {
-            if span.styles.is_plain() {
-                span.text.clone()
-            } else {
-                let style_tokens = span.styles.tokens().join(" ");
-                format!("[{}: {}]", style_tokens, span.text)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-fn parse_spans(line: &str) -> Vec<Db8Span> {
-    let mut spans = Vec::new();
-    let mut rest = line;
-
-    while let Some(open_index) = rest.find('[') {
-        let before = &rest[..open_index];
-        push_normal_span(&mut spans, before);
-
-        let after_open = &rest[open_index + 1..];
-        let Some(close_index) = after_open.find(']') else {
-            push_normal_span(&mut spans, &rest[open_index..]);
-            return spans;
-        };
-
-        let candidate = &after_open[..close_index];
-        let Some((style_part, text_part)) = candidate.split_once(':') else {
-            push_normal_span(&mut spans, &rest[open_index..open_index + close_index + 2]);
-            rest = &after_open[close_index + 1..];
-            continue;
-        };
-
-        let styles = parse_styles(style_part);
-        spans.push(Db8Span {
-            text: text_part.trim_start().to_string(),
-            styles,
-        });
-        rest = &after_open[close_index + 1..];
-    }
-
-    push_normal_span(&mut spans, rest);
-
-    if spans.is_empty() {
-        spans.push(Db8Span {
-            text: String::new(),
-            styles: StyleSet::default(),
-        });
-    }
-
-    spans
-}
-
-fn push_normal_span(spans: &mut Vec<Db8Span>, text: &str) {
-    if !text.is_empty() {
-        spans.push(Db8Span {
-            text: text.to_string(),
-            styles: StyleSet::default(),
-        });
-    }
-}
-
-fn parse_styles(style_part: &str) -> StyleSet {
-    let mut styles = StyleSet::default();
-
-    for token in style_part.split_whitespace() {
-        match token.to_ascii_lowercase().as_str() {
-            "pocket" => styles.pocket = true,
-            "hat" => styles.hat = true,
-            "block" => styles.block = true,
-            "tag" => styles.tag = true,
-            "cite" => styles.cite = true,
-            "bold" | "emphasis" => styles.emphasis = true,
-            "underline" | "underlined" => styles.underline = true,
-            "small" | "shrunk" => styles.shrunk = true,
-            "highlight" | "highlighted" => styles.highlight = true,
-            _ => {}
+                style: BlockStyle::Normal,
+                spans: vec![Db8Span {
+                    text: String::new(),
+                    styles: StyleSet::default(),
+                }],
+            }],
         }
     }
 
-    styles
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_composable_inline_styles() {
-        let document = Db8Document::parse(
-            "Normal [emphasis underline cite: Smith 24] and [highlight shrunk: key text]",
-        );
-
-        let block = &document.blocks[0];
-        assert_eq!(block.spans.len(), 4);
-        assert_eq!(block.spans[1].text, "Smith 24");
-        assert!(block.spans[1].styles.emphasis);
-        assert!(block.spans[1].styles.underline);
-        assert!(block.spans[1].styles.cite);
-        assert_eq!(block.spans[3].text, "key text");
-        assert!(block.spans[3].styles.highlight);
-        assert!(block.spans[3].styles.shrunk);
+    pub fn to_db8(&self) -> String {
+        serde_json::to_string_pretty(self)
+            .unwrap_or_else(|_| "{\"version\":1,\"blocks\":[]}".to_string())
     }
 
-    #[test]
-    fn supports_legacy_alias_tokens() {
-        let document = Db8Document::parse("[bold small: Alias handling]");
-        let span = &document.blocks[0].spans[0];
-        assert!(span.styles.emphasis);
-        assert!(span.styles.shrunk);
-    }
-
-    #[test]
-    fn serializes_back_to_db8_line_syntax() {
-        let document = Db8Document::parse("A [tag emphasis: claim] line");
-        assert_eq!(document.to_db8(), "A [tag emphasis: claim] line");
+    pub fn to_bytes(&self) -> Vec<u8> {
+        rmp_serde::to_vec_named(self).unwrap_or_else(|_| self.to_db8().into_bytes())
     }
 }

@@ -1,4 +1,4 @@
-use crate::db8_document::{Db8Document, Db8Span, StyleSet};
+use crate::db8_document::{BlockStyle as DocumentBlockStyle, Db8Document, Db8Span, StyleSet};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
@@ -292,7 +292,7 @@ pub fn db8_document_to_typst(document: &Db8Document, config: &Db8StyleConfig) ->
         let block_text = block
             .spans
             .iter()
-            .map(span_to_typst)
+            .map(|span| span_to_typst_with_block_style(span, block.style))
             .collect::<Vec<_>>()
             .join("");
 
@@ -302,9 +302,19 @@ pub fn db8_document_to_typst(document: &Db8Document, config: &Db8StyleConfig) ->
     out
 }
 
-fn span_to_typst(span: &Db8Span) -> String {
+fn span_to_typst_with_block_style(span: &Db8Span, block_style: DocumentBlockStyle) -> String {
+    let mut styles = span.styles;
+    match block_style {
+        DocumentBlockStyle::Pocket => styles.pocket = true,
+        DocumentBlockStyle::Hat => styles.hat = true,
+        DocumentBlockStyle::Block => styles.block = true,
+        DocumentBlockStyle::Tag => styles.tag = true,
+        DocumentBlockStyle::Cite => styles.cite = true,
+        DocumentBlockStyle::Normal => {}
+    }
+
     let mut content = escape_typst(&span.text);
-    content = wrap_typst_style(span.styles, content);
+    content = wrap_typst_style(styles, content);
     content
 }
 
