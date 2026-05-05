@@ -14,18 +14,7 @@ impl DebateEditor {
             .flex_col()
             .bg(colors.background)
             .child(self.render_document_toolbar(colors, cx))
-            .when_some(self.export_status.as_ref(), |this, status| {
-                this.child(
-                    div()
-                        .px_4()
-                        .py_2()
-                        .text_size(px(11.0))
-                        .text_color(colors.text_muted)
-                        .border_b_1()
-                        .border_color(colors.border)
-                        .child(status.clone()),
-                )
-            })
+
             .child(
                 div()
                     .flex_1()
@@ -362,45 +351,7 @@ impl DebateEditor {
                             .on_mouse_down(MouseButton::Left, cx.listener(Self::apply_shrunk_style))
                             .child("S"),
                     )
-                    .child(
-                        div()
-                            .id("render-export-typ")
-                            .h(px(26.0))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(colors.border)
-                            .bg(colors.surface_elevated)
-                            .text_size(px(11.0))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(colors.background))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(Self::export_typst_source),
-                            )
-                            .child(".typ"),
-                    )
-                    .child(
-                        div()
-                            .id("render-export-pdf")
-                            .h(px(26.0))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(colors.border)
-                            .bg(colors.surface_elevated)
-                            .text_size(px(11.0))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(colors.background))
-                            .on_mouse_down(MouseButton::Left, cx.listener(Self::export_pdf))
-                            .child("PDF"),
-                    )
+
                 },
             ))
     }
@@ -671,69 +622,5 @@ impl DebateEditor {
                         colors,
                     )),
             )
-    }
-    pub(super) fn export_typst_source(
-        &mut self,
-        _event: &MouseDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(document) = self.opened_document.as_ref() else {
-            return;
-        };
-
-        let typ_path = document.path.with_extension("typ");
-        let typ_source = db8_document_to_typst(&document.parsed, &self.style_config);
-        match std::fs::write(&typ_path, typ_source) {
-            Ok(_) => self.export_status = Some(format!("Generated {}", typ_path.display())),
-            Err(error) => self.export_status = Some(format!("Export failed: {}", error)),
-        }
-        cx.notify();
-    }
-
-    pub(super) fn export_pdf(
-        &mut self,
-        _event: &MouseDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(document) = self.opened_document.as_ref() else {
-            return;
-        };
-
-        let typ_path = document.path.with_extension("typ");
-        let pdf_path = document.path.with_extension("pdf");
-        let typ_source = db8_document_to_typst(&document.parsed, &self.style_config);
-        if std::fs::write(&typ_path, typ_source).is_err() {
-            self.export_status = Some("Failed to write .typ file".to_string());
-            cx.notify();
-            return;
-        }
-
-        let typst_installed = Command::new("typst").arg("--version").output().is_ok();
-        if !typst_installed {
-            self.export_status = Some(format!(
-                "Generated {}. Install Typst to enable PDF export.",
-                typ_path.display()
-            ));
-            cx.notify();
-            return;
-        }
-
-        let status = Command::new("typst")
-            .arg("compile")
-            .arg(&typ_path)
-            .arg(&pdf_path)
-            .status();
-
-        self.export_status = Some(match status {
-            Ok(result) if result.success() => format!("Generated {}", pdf_path.display()),
-            Ok(_) => format!(
-                "Typst compile failed. .typ file is available at {}",
-                typ_path.display()
-            ),
-            Err(error) => format!("Failed to execute Typst: {}", error),
-        });
-        cx.notify();
     }
 }

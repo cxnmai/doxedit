@@ -1,9 +1,6 @@
 use crate::{
     db8_document::{BlockStyle, Db8Block, Db8Document, Db8Span, StyleSet},
-    db8_style::{
-        Db8StyleConfig, db8_document_to_typst, load_or_create_style_config, save_style_config,
-        style_config_to_css,
-    },
+    db8_style::{Db8StyleConfig, load_or_create_style_config, save_style_config, style_config_to_css},
     project_tree::{ProjectTree, TreeEntry},
     theme::{AppColors, ColorMode},
 };
@@ -16,7 +13,6 @@ use std::{
     any::Any,
     collections::HashSet,
     path::{Path, PathBuf},
-    process::Command,
     time::Duration,
 };
 
@@ -56,7 +52,6 @@ pub struct DebateEditor {
     style_config_path: PathBuf,
     style_config: Db8StyleConfig,
     generated_css: String,
-    export_status: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -168,7 +163,6 @@ impl DebateEditor {
             style_config_path,
             style_config,
             generated_css,
-            export_status: None,
             _subscriptions: vec![keyboard_subscription],
         }
     }
@@ -247,7 +241,6 @@ impl DebateEditor {
                     this.style_config_path = style_config_path;
                     this.style_config = style_config;
                     this.generated_css = generated_css;
-                    this.export_status = None;
                     this.expanded_folders = expanded_folders;
                     this.sidebar_open = true;
                     cx.notify();
@@ -276,7 +269,6 @@ impl DebateEditor {
         self.render_mouse_selecting = false;
         self.render_mouse_anchor = None;
         self.render_active_styles = StyleSet::default();
-        self.export_status = None;
         cx.notify();
     }
 }
