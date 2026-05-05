@@ -126,13 +126,13 @@ impl Default for Db8StyleConfig {
             },
             pocket: PocketStyle {
                 font_size_pt: 26.0,
-                font_weight: 700,
+                font_weight: 1200,
                 spacing_before_pt: 12.0,
                 spacing_after_pt: 8.0,
             },
             hat: HatStyle {
                 font_size_pt: 22.0,
-                font_weight: 700,
+                font_weight: 1200,
                 text_color: "#111111".to_string(),
                 spacing_before_pt: 8.0,
                 spacing_after_pt: 4.0,
@@ -143,7 +143,7 @@ impl Default for Db8StyleConfig {
             tag: TagStyle {
                 font_family: "Calibri".to_string(),
                 font_size_pt: 13.0,
-                font_weight: 700,
+                font_weight: 1200,
                 text_color: "#000000".to_string(),
             },
             cite: CiteStyle {
@@ -159,7 +159,7 @@ impl Default for Db8StyleConfig {
                 background: "#fff176".to_string(),
                 text_color: "#000000".to_string(),
             },
-            emphasis: EmphasisStyle { font_weight: 700 },
+            emphasis: EmphasisStyle { font_weight: 1200 },
             underline: UnderlineStyle {
                 color: "#000000".to_string(),
                 thickness_px: 1,
@@ -194,7 +194,7 @@ pub fn save_style_config(path: &Path, config: &Db8StyleConfig) -> std::io::Resul
 
 pub fn style_config_to_css(config: &Db8StyleConfig) -> String {
     format!(
-        ".db8-editor {{\n  width: {};\n  margin-left: {};\n  margin-right: {};\n  font-family: \"{}\";\n  font-size: {}pt;\n  line-height: {};\n}}\n\n.db8-pocket {{\n  font-size: {}pt;\n  font-weight: {};\n  margin-top: {}pt;\n  margin-bottom: {}pt;\n  border: 1px solid #000000;\n  padding: 2pt 6pt;\n  text-align: center;\n}}\n\n.db8-hat {{\n  font-size: {}pt;\n  font-weight: {};\n  color: {};\n  margin-top: {}pt;\n  margin-bottom: {}pt;\n  text-decoration-line: underline;\n  text-decoration-style: double;\n}}\n\n.db8-block {{\n  font-size: 16pt;\n  font-weight: 700;\n  text-decoration-line: underline;\n  margin-bottom: {}pt;\n}}\n\n.db8-tag {{\n  font-family: \"{}\";\n  font-size: {}pt;\n  font-weight: {};\n  color: {};\n}}\n\n.db8-cite {{\n  font-family: \"{}\";\n  font-size: {}pt;\n  font-weight: {};\n  font-style: {};\n  color: {};\n}}\n\n.db8-normal {{\n  font-size: {}pt;\n  color: {};\n}}\n\n.db8-highlight {{\n  background: {};\n  color: {};\n}}\n\n.db8-emphasis {{\n  font-weight: {};\n  border: 1px solid #000000;\n  padding: 0pt 2pt;\n}}\n\n.db8-underline {{\n  text-decoration-line: underline;\n  text-decoration-color: {};\n  text-decoration-thickness: {}px;\n}}\n\n.db8-shrunk {{\n  font-size: {}%;\n  line-height: {};\n}}\n",
+        ".db8-editor {{\n  width: {};\n  margin-left: {};\n  margin-right: {};\n  font-family: \"{}\";\n  font-size: {}pt;\n  line-height: {};\n}}\n\n.db8-pocket {{\n  font-size: {}pt;\n  font-weight: {};\n  margin-top: {}pt;\n  margin-bottom: {}pt;\n  border: 1px solid #000000;\n  padding: 2pt 6pt;\n  text-align: center;\n}}\n\n.db8-hat {{\n  font-size: {}pt;\n  font-weight: {};\n  color: {};\n  margin-top: {}pt;\n  margin-bottom: {}pt;\n  text-decoration-line: underline;\n  text-decoration-style: double;\n}}\n\n.db8-block {{\n  font-size: 16pt;\n  font-weight: 1200;\n  text-decoration-line: underline;\n  margin-bottom: {}pt;\n}}\n\n.db8-tag {{\n  font-family: \"{}\";\n  font-size: {}pt;\n  font-weight: {};\n  color: {};\n}}\n\n.db8-cite {{\n  font-family: \"{}\";\n  font-size: {}pt;\n  font-weight: {};\n  font-style: {};\n  color: {};\n}}\n\n.db8-normal {{\n  font-size: {}pt;\n  color: {};\n}}\n\n.db8-highlight {{\n  background: {};\n  color: {};\n}}\n\n.db8-emphasis {{\n  font-weight: {};\n  border: 1px solid #000000;\n  padding: 0pt 2pt;\n}}\n\n.db8-underline {{\n  text-decoration-line: underline;\n  text-decoration-color: {};\n  text-decoration-thickness: {}px;\n}}\n\n.db8-shrunk {{\n  font-size: {}%;\n  line-height: {};\n}}\n",
         config.page.width,
         config.page.margin_left,
         config.page.margin_right,
@@ -215,15 +215,11 @@ pub fn style_config_to_css(config: &Db8StyleConfig) -> String {
         config.tag.font_size_pt,
         config.tag.font_weight,
         config.tag.text_color,
-        config.body.font_family,
-        config.cite.font_size_pt,
+        config.tag.font_family,
+        config.tag.font_size_pt,
         config.tag.font_weight,
-        if config.cite.italic {
-            "italic"
-        } else {
-            "normal"
-        },
-        config.cite.text_color,
+        "normal",
+        config.tag.text_color,
         config.normal.font_size_pt,
         config.normal.text_color,
         config.highlight.background,
@@ -238,7 +234,7 @@ pub fn style_config_to_css(config: &Db8StyleConfig) -> String {
 
 pub fn style_config_to_typst_theme(config: &Db8StyleConfig) -> String {
     format!(
-        "#set page(width: {}, margin: (left: {}, right: {}))\n#set text(font: \"{}\", size: {}pt)\n\n#let db8_pocket(body) = block(spacing: {}pt, stroke: (paint: black, thickness: 1pt), inset: (x: 6pt, y: 2pt))[#align(center)[#text(size: {}pt, weight: {})[#body]]]\n#let db8_hat(body) = block(spacing: {}pt)[#underline(stroke: (paint: rgb(\"{}\"), thickness: 1pt))[#underline(stroke: (paint: rgb(\"{}\"), thickness: 1pt))[#text(size: {}pt, weight: {}, fill: rgb(\"{}\"))[#body]]]]\n#let db8_block(body) = block(spacing: {}pt)[#underline[#text(size: 16pt, weight: 700)[#body]]]\n#let db8_tag(body) = text(font: \"{}\", size: {}pt, weight: {}, fill: rgb(\"{}\"))[#body]\n#let db8_cite(body) = text(font: \"{}\", size: {}pt, weight: {}, style: \"{}\", fill: rgb(\"{}\"))[#body]\n#let db8_normal(body) = text(size: {}pt, fill: rgb(\"{}\"))[#body]\n#let db8_highlight(body) = box(fill: rgb(\"{}\"), inset: (x: 1pt, y: 0pt))[#text(fill: rgb(\"{}\"))[#body]]\n#let db8_emphasis(body) = box(stroke: (paint: black, thickness: 1pt), inset: (x: 2pt, y: 0pt))[#text(weight: {})[#body]]\n#let db8_underline(body) = underline(stroke: (paint: rgb(\"{}\"), thickness: {}pt))[#body]\n#let db8_shrunk(body) = text(size: {}pt)[#body]\n",
+        "#set page(width: {}, margin: (left: {}, right: {}))\n#set text(font: \"{}\", size: {}pt)\n\n#let db8_pocket(body) = block(spacing: {}pt, stroke: (paint: black, thickness: 1pt), inset: (x: 6pt, y: 2pt))[#align(center)[#text(size: {}pt, weight: {})[#body]]]\n#let db8_hat(body) = block(spacing: {}pt)[#underline(stroke: (paint: rgb(\"{}\"), thickness: 1pt))[#underline(stroke: (paint: rgb(\"{}\"), thickness: 1pt))[#text(size: {}pt, weight: {}, fill: rgb(\"{}\"))[#body]]]]\n#let db8_block(body) = block(spacing: {}pt)[#underline[#text(size: 16pt, weight: 1200)[#body]]]\n#let db8_tag(body) = text(font: \"{}\", size: {}pt, weight: {}, fill: rgb(\"{}\"))[#body]\n#let db8_cite(body) = text(font: \"{}\", size: {}pt, weight: {}, style: \"{}\", fill: rgb(\"{}\"))[#body]\n#let db8_normal(body) = text(size: {}pt, fill: rgb(\"{}\"))[#body]\n#let db8_highlight(body) = box(fill: rgb(\"{}\"), inset: (x: 1pt, y: 0pt))[#text(fill: rgb(\"{}\"))[#body]]\n#let db8_emphasis(body) = box(stroke: (paint: black, thickness: 1pt), inset: (x: 2pt, y: 0pt))[#text(weight: {})[#body]]\n#let db8_underline(body) = underline(stroke: (paint: rgb(\"{}\"), thickness: {}pt))[#body]\n#let db8_shrunk(body) = text(size: {}pt)[#body]\n",
         config.page.width,
         config.page.margin_left,
         config.page.margin_right,
@@ -258,15 +254,11 @@ pub fn style_config_to_typst_theme(config: &Db8StyleConfig) -> String {
         config.tag.font_size_pt,
         config.tag.font_weight,
         config.tag.text_color,
-        config.body.font_family,
-        config.cite.font_size_pt,
+        config.tag.font_family,
+        config.tag.font_size_pt,
         config.tag.font_weight,
-        if config.cite.italic {
-            "italic"
-        } else {
-            "normal"
-        },
-        config.cite.text_color,
+        "normal",
+        config.tag.text_color,
         config.normal.font_size_pt,
         config.normal.text_color,
         config.highlight.background,

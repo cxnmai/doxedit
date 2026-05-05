@@ -849,16 +849,7 @@ fn render_line_mouse_column(
     for span in &block.spans {
         let effective_styles = block_style_to_styles(block.style, span.styles);
         let font_px = rendered_span_font_size_px(effective_styles, style_config);
-        let weight_factor = if effective_styles.pocket
-            || effective_styles.hat
-            || effective_styles.block
-            || effective_styles.tag
-            || effective_styles.emphasis
-        {
-            1.08
-        } else {
-            1.0
-        };
+        let weight_factor = faux_bold_width_factor(effective_styles);
 
         for ch in span.text.chars() {
             let width = approximate_calibri_char_width(ch, font_px) * weight_factor;
@@ -880,16 +871,7 @@ fn rendered_block_width(block: &Db8Block, style_config: &Db8StyleConfig) -> f32 
         .map(|span| {
             let effective_styles = block_style_to_styles(block.style, span.styles);
             let font_px = rendered_span_font_size_px(effective_styles, style_config);
-            let weight_factor = if effective_styles.pocket
-                || effective_styles.hat
-                || effective_styles.block
-                || effective_styles.tag
-                || effective_styles.emphasis
-            {
-                1.08
-            } else {
-                1.0
-            };
+            let weight_factor = faux_bold_width_factor(effective_styles);
             span.text
                 .chars()
                 .map(|ch| approximate_calibri_char_width(ch, font_px) * weight_factor)
@@ -1105,7 +1087,8 @@ fn render_db8_text_segment(
     let highlight_bg = color_from_hex(&style_config.highlight.background, gpui::yellow().into());
     let highlight_text = color_from_hex(&style_config.highlight.text_color, gpui::black().into());
     let tag_color = color_from_hex(&style_config.tag.text_color, gpui::black().into());
-    let cite_color = color_from_hex(&style_config.cite.text_color, gpui::black().into());
+    // Cites intentionally render exactly like tags in the live editor.
+    let cite_color = tag_color;
     let base_size_pt = if styles.pocket {
         26.0
     } else if styles.hat {
@@ -1122,27 +1105,40 @@ fn render_db8_text_segment(
     } else {
         base_size_pt
     };
+    let text_color = if styles.highlight {
+        highlight_text
+    } else if styles.tag {
+        tag_color
+    } else if styles.cite {
+        cite_color
+    } else {
+        base_color
+    };
+    let is_heavy = styles.pocket
+        || styles.hat
+        || styles.block
+        || styles.tag
+        || styles.cite
+        || styles.emphasis;
+    let (faux_bold_offset, faux_bold_opacity) = faux_bold_overlay(styles);
+
+    let rendered_size_px = size_pt * 1.33;
+    let font_family = if styles.tag || styles.cite {
+        style_config.tag.font_family.clone()
+    } else {
+        style_config.body.font_family.clone()
+    };
 
     div()
         .id(SharedString::from(format!(
             "db8-{}",
             semantic_span_class(styles)
         )))
-        .font_family("Calibri")
-        .text_size(px(size_pt * 1.33))
-        .text_color(if styles.highlight {
-            highlight_text
-        } else if styles.tag {
-            tag_color
-        } else if styles.cite {
-            cite_color
-        } else {
-            base_color
-        })
-        .when(
-            styles.pocket || styles.hat || styles.block || styles.tag || styles.emphasis,
-            |this| this.font_weight(gpui::FontWeight::BLACK),
-        )
+        .relative()
+        .font_family(font_family)
+        .text_size(px(rendered_size_px))
+        .text_color(text_color)
+        .when(is_heavy, |this| this.font_weight(gpui::FontWeight::BLACK))
         .when(styles.hat, |this| {
             this.underline().border_b_1().border_color(gpui::black())
         })
@@ -1151,11 +1147,62 @@ fn render_db8_text_segment(
         })
         .when(styles.highlight, |this| this.bg(highlight_bg))
         .when(styles.emphasis, |this| {
-            this.border_1().border_color(gpui::black()).px_1()
+            // Keep adjacent emphasis boxes visually contiguous even when spans are
+            // split because of highlight/underline/etc. Avoiding horizontal gap
+            // makes mixed-style emphasized runs read as one boxed phrase.
+            this.border_1().border_color(gpui::black()).px_1().mx(px(-1.0))
         })
         .when(selected, |this| this.bg(gpui::blue().opacity(0.22)))
+        .when(is_heavy, |this| {
+            // Use the selected/configured font, but add a single translucent
+            // sub-pixel pass to thicken it. This is smoother than the previous
+            // two-pass faux bold and still works when the font has no heavier
+            // face available.
+            this.child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(faux_bold_offset))
+                    .opacity(faux_bold_opacity)
+                    .text_color(text_color)
+                    .child(text.to_string()),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(-faux_bold_offset))
+                    .opacity(faux_bold_opacity)
+                    .text_color(text_color)
+                    .child(text.to_string()),
+            )
+        })
         .child(text.to_string())
         .into_any_element()
+}
+
+fn faux_bold_overlay(styles: StyleSet) -> (f32, f32) {
+    if styles.tag || styles.cite {
+        (0.34, 0.72)
+    } else if styles.block {
+        (0.48, 0.88)
+    } else if styles.pocket || styles.hat || styles.emphasis {
+        (0.55, 0.95)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+fn faux_bold_width_factor(styles: StyleSet) -> f32 {
+    if styles.tag || styles.cite {
+        1.18
+    } else if styles.block {
+        1.26
+    } else if styles.pocket || styles.hat || styles.emphasis {
+        1.32
+    } else {
+        1.0
+    }
 }
 
 fn semantic_span_class(styles: StyleSet) -> &'static str {

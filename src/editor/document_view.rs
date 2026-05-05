@@ -28,39 +28,57 @@ impl DebateEditor {
             })
             .child(
                 div()
-                    .id("document-scroll")
                     .flex_1()
-                    .overflow_scroll()
-                    .bg(colors.background)
-                    .when_some(self.opened_document.as_ref(), |this, document| {
-                        match self.document_view_mode {
-                            DocumentViewMode::Raw => {
-                                this.child(self.render_raw_document(document, colors, cx))
-                            }
-                            DocumentViewMode::Render => {
-                                this.child(self.render_editable_db8_document(document, colors, cx))
-                            }
-                        }
-                    })
-                    .when(self.opened_document.is_none(), |this| {
-                        this.flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(18.0))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child("No document open"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.0))
-                                    .text_color(colors.text_muted)
-                                    .child("Open a .db8 file from the project tree."),
-                            )
-                    }),
+                    .min_h(px(0.0))
+                    .flex()
+                    .child(
+                        div()
+                            .id("document-scroll")
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_scroll()
+                            .bg(colors.background)
+                            .when_some(self.opened_document.as_ref(), |this, document| {
+                                match self.document_view_mode {
+                                    DocumentViewMode::Raw => {
+                                        this.child(self.render_raw_document(document, colors, cx))
+                                    }
+                                    DocumentViewMode::Render => this.child(
+                                        self.render_editable_db8_document(document, colors, cx),
+                                    ),
+                                }
+                            })
+                            .when(self.opened_document.is_none(), |this| {
+                                this.flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_size(px(18.0))
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .child("No document open"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .text_color(colors.text_muted)
+                                            .child("Open a .db8 file from the project tree."),
+                                    )
+                            }),
+                    )
+                    .when(
+                        self.document_view_mode == DocumentViewMode::Render
+                            && self.opened_document.is_some(),
+                        |this| {
+                            this.child(self.render_document_outline(
+                                self.opened_document.as_ref().unwrap(),
+                                colors,
+                                cx,
+                            ))
+                        },
+                    ),
             )
     }
 

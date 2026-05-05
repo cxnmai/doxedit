@@ -22,6 +22,8 @@ use std::{
 
 #[path = "editor/app_shell.rs"]
 mod app_shell;
+#[path = "editor/document_outline.rs"]
+mod document_outline;
 #[path = "editor/document_view.rs"]
 mod document_view;
 #[path = "editor/editing.rs"]
@@ -44,6 +46,7 @@ pub struct DebateEditor {
     raw_mouse_selecting: bool,
     raw_mouse_anchor: Option<usize>,
     render_editor_focus: FocusHandle,
+    expanded_document_outline: HashSet<String>,
     render_cursor: RawCursor,
     render_selection: Option<RawSelection>,
     render_mouse_selecting: bool,
@@ -155,6 +158,7 @@ impl DebateEditor {
             raw_mouse_selecting: false,
             raw_mouse_anchor: None,
             render_editor_focus,
+            expanded_document_outline: HashSet::new(),
             render_cursor: RawCursor::default(),
             render_selection: None,
             render_mouse_selecting: false,
@@ -234,6 +238,7 @@ impl DebateEditor {
                     this.raw_mouse_selecting = false;
                     this.raw_mouse_anchor = None;
                     this.render_cursor = RawCursor::default();
+                    this.expanded_document_outline.clear();
                     this.render_selection = None;
                     this.render_mouse_selecting = false;
                     this.render_mouse_anchor = None;
@@ -256,6 +261,8 @@ impl DebateEditor {
         let bytes = std::fs::read(&path).unwrap_or_default();
         let parsed = Db8Document::from_bytes(&bytes);
         let raw = parsed.to_db8();
+        let expanded_document_outline =
+            document_outline::default_document_outline_expansion(&parsed);
 
         self.selected_file = Some(path.clone());
         self.opened_document = Some(OpenedDocument { path, raw, parsed });
@@ -264,6 +271,7 @@ impl DebateEditor {
         self.raw_mouse_selecting = false;
         self.raw_mouse_anchor = None;
         self.render_cursor = RawCursor::default();
+        self.expanded_document_outline = expanded_document_outline;
         self.render_selection = None;
         self.render_mouse_selecting = false;
         self.render_mouse_anchor = None;
