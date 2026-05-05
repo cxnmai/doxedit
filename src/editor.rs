@@ -17,6 +17,7 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 pub struct DebateEditor {
@@ -39,6 +40,7 @@ pub struct DebateEditor {
     render_mouse_selecting: bool,
     render_mouse_anchor: Option<usize>,
     render_active_styles: StyleSet,
+    render_clipboard: Option<Db8Document>,
     style_config_path: PathBuf,
     style_config: Db8StyleConfig,
     generated_css: String,
@@ -116,6 +118,15 @@ impl DebateEditor {
         let raw_editor_focus = cx.focus_handle();
         let render_editor_focus = cx.focus_handle();
         let keyboard_subscription = cx.observe_keystrokes(Self::handle_editor_keystroke);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.refresh_project_tree(cx);
+                });
+            }
+        })
+        .detach();
         let style_config_path = project_root.join(".db8_style.json");
         let style_config = load_or_create_style_config(&style_config_path);
         let generated_css = style_config_to_css(&style_config);
@@ -140,6 +151,7 @@ impl DebateEditor {
             render_mouse_selecting: false,
             render_mouse_anchor: None,
             render_active_styles: StyleSet::default(),
+            render_clipboard: None,
             style_config_path,
             style_config,
             generated_css,
@@ -217,6 +229,7 @@ impl DebateEditor {
                     this.render_mouse_selecting = false;
                     this.render_mouse_anchor = None;
                     this.render_active_styles = StyleSet::default();
+                    this.render_clipboard = None;
                     this.style_config_path = style_config_path;
                     this.style_config = style_config;
                     this.generated_css = generated_css;
@@ -387,29 +400,69 @@ impl DebateEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let base_name = "new_file";
-        let mut index = 0;
+        self.create_db8_file_in_directory(self.project_tree.root.clone(), cx);
+    }
 
-        let file_path = loop {
-            let suffix = if index == 0 {
-                String::new()
-            } else {
-                format!("_{}", index)
-            };
-            let candidate = self
-                .project_tree
-                .root
-                .join(format!("{}{}.db8", base_name, suffix));
-            if !candidate.exists() {
-                break candidate;
-            }
-            index += 1;
-        };
+    fn create_root_directory(
+        &mut self,
+        _event: &gpui::ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_directory_in_directory(self.project_tree.root.clone(), cx);
+    }
 
-        if std::fs::write(&file_path, "").is_ok() {
+    fn create_db8_file_in_directory(&mut self, directory: PathBuf, cx: &mut Context<Self>) {
+        let file_path = next_available_path(&directory, "new_file", "db8");
+        let document = Db8Document::empty();
+        if std::fs::write(&file_path, document.to_bytes()).is_ok() {
             self.refresh_project_tree(cx);
             self.select_file(file_path, cx);
         }
+    }
+
+    fn create_directory_in_directory(&mut self, directory: PathBuf, cx: &mut Context<Self>) {
+        let folder_path = next_available_folder_path(&directory, "new_folder");
+        if std::fs::create_dir_all(&folder_path).is_ok() {
+            self.expanded_folders.insert(directory);
+            self.expanded_folders.insert(folder_path);
+            self.refresh_project_tree(cx);
+        }
+    }
+
+    fn delete_tree_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if path == self.project_tree.root {
+            return;
+        }
+
+        let delete_result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+
+        if delete_result.is_err() {
+            return;
+        }
+
+        if self
+            .selected_file
+            .as_ref()
+            .is_some_and(|selected| selected == &path)
+        {
+            self.selected_file = None;
+            self.opened_document = None;
+        }
+
+        if let Some(document) = self.opened_document.as_ref()
+            && document.path.starts_with(&path)
+        {
+            self.selected_file = None;
+            self.opened_document = None;
+        }
+
+        self.expanded_folders.remove(&path);
+        self.refresh_project_tree(cx);
     }
 
     fn can_drop_tree_file_to(
@@ -506,6 +559,8 @@ impl DebateEditor {
                 "v" => {
                     let changed = if editing_raw {
                         self.raw_paste_clipboard(cx)
+                    } else if keystroke.modifiers.shift {
+                        self.render_paste_plain_clipboard(cx)
                     } else {
                         self.render_paste_clipboard(cx)
                     };
@@ -905,8 +960,10 @@ impl DebateEditor {
         }
     }
 
-    fn render_copy_selection_or_line(&self, cx: &mut Context<Self>) {
-        if let Some(text) = self.render_selected_text() {
+    fn render_copy_selection_or_line(&mut self, cx: &mut Context<Self>) {
+        if let Some(fragment) = self.render_selected_fragment() {
+            let text = rendered_document_text(&fragment);
+            self.render_clipboard = Some(fragment);
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             return;
         }
@@ -914,45 +971,58 @@ impl DebateEditor {
         if let Some(document) = self.opened_document.as_ref()
             && let Some(block) = document.parsed.blocks.get(self.render_cursor.line)
         {
+            let fragment = Db8Document {
+                version: 1,
+                blocks: vec![block.clone()],
+            };
+            self.render_clipboard = Some(fragment);
             cx.write_to_clipboard(ClipboardItem::new_string(rendered_line_text(block)));
         }
     }
 
     fn render_paste_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(fragment) = self.render_clipboard.clone() {
+            return self.render_insert_fragment(&fragment);
+        }
+
+        self.render_paste_plain_clipboard(cx)
+    }
+
+    fn render_paste_plain_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return false;
         };
         self.render_insert_text(&text)
     }
 
-    fn render_selected_text(&self) -> Option<String> {
+    fn render_selected_fragment(&self) -> Option<Db8Document> {
         let document = self.opened_document.as_ref()?;
         let selection = self.render_selection?;
         let (start, end) = selection.ordered();
         if start == end {
             return None;
         }
+        copy_rendered_range(&document.parsed, start, end)
+    }
 
-        let mut out = String::new();
-        let mut offset = 0usize;
+    fn render_insert_fragment(&mut self, fragment: &Db8Document) -> bool {
+        let Some(document) = self.opened_document.as_mut() else {
+            return false;
+        };
 
-        for block in &document.parsed.blocks {
-            let line = rendered_line_text(block);
-            let line_end = offset + line.len();
-            if end > offset && start < line_end {
-                let local_start = start.saturating_sub(offset).min(line.len());
-                let local_end = end.saturating_sub(offset).min(line.len());
-                if local_start < local_end {
-                    out.push_str(&line[local_start..local_end]);
-                }
-            }
-            offset = line_end + 1;
-            if end > line_end && start < offset {
-                out.push('\n');
+        if let Some(selection) = self.render_selection.take() {
+            let (start, end) = selection.ordered();
+            if delete_rendered_range(&mut document.parsed, start, end) {
+                self.render_cursor = rendered_global_offset_to_cursor(&document.parsed, start);
             }
         }
 
-        if out.is_empty() { None } else { Some(out) }
+        self.render_cursor =
+            insert_rendered_fragment(&mut document.parsed, self.render_cursor, fragment);
+        normalize_document_spans(&mut document.parsed);
+        document.raw = document.parsed.to_db8();
+        document.parsed = Db8Document::parse(&document.raw);
+        true
     }
 
     fn render_insert_text(&mut self, text: &str) -> bool {
@@ -1093,22 +1163,28 @@ impl DebateEditor {
             let span_end = consumed + span_len;
 
             if target_column <= span_start {
+                let mut span = span;
+                clear_primary_semantic_styles(&mut span.styles);
                 right_spans.push(span);
             } else if target_column >= span_end {
+                let mut span = span;
+                clear_primary_semantic_styles(&mut span.styles);
                 left_spans.push(span);
             } else {
                 let local = target_column.saturating_sub(span_start).min(span_len);
                 let (left_text, right_text) = span.text.split_at(local);
+                let mut styles = span.styles;
+                clear_primary_semantic_styles(&mut styles);
                 if !left_text.is_empty() {
                     left_spans.push(Db8Span {
                         text: left_text.to_string(),
-                        styles: span.styles,
+                        styles,
                     });
                 }
                 if !right_text.is_empty() {
                     right_spans.push(Db8Span {
                         text: right_text.to_string(),
-                        styles: span.styles,
+                        styles,
                     });
                 }
             }
@@ -1136,7 +1212,7 @@ impl DebateEditor {
             line_index + 1,
             Db8Block {
                 source_line: line_index + 1,
-                style: current_block.style,
+                style: BlockStyle::Normal,
                 spans: right_spans,
             },
         );
@@ -1241,6 +1317,46 @@ impl DebateEditor {
         }
     }
 
+    fn start_render_end_mouse_selection(
+        &mut self,
+        _event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(document) = self.opened_document.as_ref() else {
+            return;
+        };
+        let end = rendered_document_len(&document.parsed);
+        self.render_mouse_selecting = false;
+        self.render_mouse_anchor = Some(end);
+        self.render_selection = None;
+        self.render_cursor = rendered_global_offset_to_cursor(&document.parsed, end);
+        window.focus(&self.render_editor_focus);
+        cx.notify();
+    }
+
+    fn update_render_end_mouse_selection(
+        &mut self,
+        _event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(anchor) = self.render_mouse_anchor else {
+            return;
+        };
+        let Some(document) = self.opened_document.as_ref() else {
+            return;
+        };
+        let end = rendered_document_len(&document.parsed);
+        if anchor == end {
+            return;
+        }
+        self.render_mouse_selecting = true;
+        self.render_selection = Some(RawSelection { anchor, head: end });
+        self.render_cursor = rendered_global_offset_to_cursor(&document.parsed, end);
+        cx.notify();
+    }
+
     fn start_render_mouse_selection(
         &mut self,
         line: usize,
@@ -1261,18 +1377,52 @@ impl DebateEditor {
             block,
             f32::from(event.position.x),
             self.sidebar_open,
+            f32::from(window.viewport_size().width),
             &self.style_config,
         )
         .min(line_char_count);
 
+        let line_start = rendered_line_start_offset(&document.parsed, line);
+        let line_len = line_text.len();
+
         self.render_mouse_selecting = false;
+        window.focus(&self.render_editor_focus);
+
+        if event.click_count >= 3 {
+            self.render_mouse_anchor = None;
+            self.render_selection = Some(RawSelection {
+                anchor: line_start,
+                head: line_start + line_len,
+            });
+            self.render_cursor = RawCursor {
+                line,
+                column: line_len,
+            };
+            cx.notify();
+            return;
+        }
+
+        if event.click_count == 2 {
+            let (word_start, word_end) = word_range_at_column(&line_text, column);
+            self.render_mouse_anchor = None;
+            self.render_selection = Some(RawSelection {
+                anchor: line_start + word_start,
+                head: line_start + word_end,
+            });
+            self.render_cursor = RawCursor {
+                line,
+                column: word_end,
+            };
+            cx.notify();
+            return;
+        }
+
         self.render_mouse_anchor = Some(rendered_cursor_to_global_offset(
             &document.parsed,
             RawCursor { line, column },
         ));
         self.render_selection = None;
         self.render_cursor = RawCursor { line, column };
-        window.focus(&self.render_editor_focus);
         cx.notify();
     }
 
@@ -1280,7 +1430,7 @@ impl DebateEditor {
         &mut self,
         line: usize,
         event: &MouseMoveEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(anchor) = self.render_mouse_anchor else {
@@ -1299,6 +1449,7 @@ impl DebateEditor {
             block,
             f32::from(event.position.x),
             self.sidebar_open,
+            f32::from(window.viewport_size().width),
             &self.style_config,
         )
         .min(line_char_count);
@@ -1327,7 +1478,7 @@ impl DebateEditor {
         self.render_mouse_anchor = None;
     }
 
-    fn line_has_style(&self, style_token: &str) -> bool {
+    fn cursor_has_style(&self, style_token: &str) -> bool {
         let Some(document) = self.opened_document.as_ref() else {
             return false;
         };
@@ -1344,11 +1495,20 @@ impl DebateEditor {
         };
 
         match style_token {
+            "normal" => block.style == BlockStyle::Normal,
             "pocket" => block.style == BlockStyle::Pocket,
             "hat" => block.style == BlockStyle::Hat,
             "block" => block.style == BlockStyle::Block,
             "tag" => block.style == BlockStyle::Tag,
             "cite" => block.style == BlockStyle::Cite,
+            "highlight" => rendered_cursor_styles(&document.parsed, self.render_cursor)
+                .is_some_and(|styles| styles.highlight),
+            "emphasis" => rendered_cursor_styles(&document.parsed, self.render_cursor)
+                .is_some_and(|styles| styles.emphasis),
+            "underline" => rendered_cursor_styles(&document.parsed, self.render_cursor)
+                .is_some_and(|styles| styles.underline),
+            "shrunk" => rendered_cursor_styles(&document.parsed, self.render_cursor)
+                .is_some_and(|styles| styles.shrunk),
             _ => false,
         }
     }
@@ -1357,7 +1517,14 @@ impl DebateEditor {
         self.ensure_render_cursor_in_bounds();
 
         if is_line_semantic_style(style_token) {
-            self.render_selection = None;
+            if let Some(selection) = self.render_selection {
+                let (start, end) = selection.ordered();
+                self.apply_line_semantic_style_to_range(style_token, start, end);
+                self.autosave_raw_document();
+                cx.notify();
+                return;
+            }
+
             self.apply_line_semantic_style(style_token);
             self.autosave_raw_document();
             cx.notify();
@@ -1378,11 +1545,24 @@ impl DebateEditor {
                 return;
             };
 
-            if apply_inline_style_to_rendered_range(&mut document.parsed, start, end, style_token) {
+            let remove_style =
+                rendered_range_has_inline_style(&document.parsed, start, end, style_token);
+            if apply_inline_style_to_rendered_range(
+                &mut document.parsed,
+                start,
+                end,
+                style_token,
+                !remove_style,
+            ) {
                 document.raw = document.parsed.to_db8();
                 document.parsed = Db8Document::parse(&document.raw);
-                self.render_selection = None;
-                self.render_cursor = rendered_global_offset_to_cursor(&document.parsed, end);
+                let bounded_end = rendered_document_len(&document.parsed).min(end);
+                self.render_selection = Some(RawSelection {
+                    anchor: start,
+                    head: bounded_end,
+                });
+                self.render_cursor =
+                    rendered_global_offset_to_cursor(&document.parsed, bounded_end);
                 self.autosave_raw_document();
                 cx.notify();
             }
@@ -1392,6 +1572,65 @@ impl DebateEditor {
         self.toggle_active_style(style_token);
         self.autosave_raw_document();
         cx.notify();
+    }
+
+    fn apply_line_semantic_style_to_range(&mut self, style_token: &str, start: usize, end: usize) {
+        let Some(document) = self.opened_document.as_mut() else {
+            return;
+        };
+        if document.parsed.blocks.is_empty() || start == end {
+            return;
+        }
+
+        let start_cursor = rendered_global_offset_to_cursor(&document.parsed, start);
+        let mut end_cursor = rendered_global_offset_to_cursor(&document.parsed, end);
+        if end_cursor.column == 0 && end_cursor.line > start_cursor.line {
+            end_cursor.line = end_cursor.line.saturating_sub(1);
+            end_cursor.column = document
+                .parsed
+                .blocks
+                .get(end_cursor.line)
+                .map(rendered_line_text)
+                .map_or(0, |text| text.len());
+        }
+
+        let start_line = start_cursor
+            .line
+            .min(document.parsed.blocks.len().saturating_sub(1));
+        let end_line = end_cursor
+            .line
+            .min(document.parsed.blocks.len().saturating_sub(1));
+        let target_style = block_style_from_token(style_token);
+        let all_already_style = (start_line..=end_line).all(|line| {
+            document
+                .parsed
+                .blocks
+                .get(line)
+                .is_some_and(|block| block.style == target_style)
+        });
+        let new_style = if all_already_style {
+            BlockStyle::Normal
+        } else {
+            target_style
+        };
+
+        for line in start_line..=end_line {
+            if let Some(block) = document.parsed.blocks.get_mut(line) {
+                block.style = new_style;
+                for span in &mut block.spans {
+                    clear_primary_semantic_styles(&mut span.styles);
+                }
+            }
+        }
+
+        document.raw = document.parsed.to_db8();
+        document.parsed = Db8Document::parse(&document.raw);
+        let bounded_end = rendered_document_len(&document.parsed).min(end);
+        self.render_selection = Some(RawSelection {
+            anchor: start,
+            head: bounded_end,
+        });
+        self.render_cursor = rendered_global_offset_to_cursor(&document.parsed, bounded_end);
     }
 
     fn apply_line_semantic_style(&mut self, style_token: &str) {
@@ -1418,13 +1657,11 @@ impl DebateEditor {
         };
 
         let mut has_visible_content = false;
-        block.style = match style_token {
-            "pocket" => BlockStyle::Pocket,
-            "hat" => BlockStyle::Hat,
-            "block" => BlockStyle::Block,
-            "tag" => BlockStyle::Tag,
-            "cite" => BlockStyle::Cite,
-            _ => BlockStyle::Normal,
+        let target_style = block_style_from_token(style_token);
+        block.style = if block.style == target_style {
+            BlockStyle::Normal
+        } else {
+            target_style
         };
         for span in &mut block.spans {
             if !span.text.trim().is_empty() {
@@ -1765,6 +2002,25 @@ impl DebateEditor {
                             )
                             .child(
                                 div()
+                                    .id("new-root-directory")
+                                    .h(px(24.0))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(colors.border)
+                                    .bg(colors.surface_elevated)
+                                    .text_size(px(12.0))
+                                    .text_color(colors.text)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(colors.background))
+                                    .on_click(cx.listener(Self::create_root_directory))
+                                    .child("+ Dir"),
+                            )
+                            .child(
+                                div()
                                     .id("open-project-directory")
                                     .h(px(24.0))
                                     .px_2()
@@ -1844,6 +2100,9 @@ impl DebateEditor {
             } => {
                 let expanded = self.expanded_folders.contains(path);
                 let path_for_click = path.clone();
+                let path_for_new_file = path.clone();
+                let path_for_new_dir = path.clone();
+                let path_for_delete = path.clone();
                 let path_for_drop_accept = path.clone();
                 let path_for_drop_action = path.clone();
                 let display_path = path
@@ -1888,7 +2147,61 @@ impl DebateEditor {
                                 this.toggle_folder(path_for_click.clone(), cx);
                             }))
                             .child(if expanded { "▾" } else { "▸" })
-                            .child(name.clone()),
+                            .child(div().flex_1().child(name.clone()))
+                            .child(
+                                div()
+                                    .h(px(20.0))
+                                    .px_1()
+                                    .rounded_sm()
+                                    .text_color(colors.text)
+                                    .hover(|this| this.bg(colors.background))
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.create_db8_file_in_directory(
+                                                path_for_new_file.clone(),
+                                                cx,
+                                            );
+                                        }),
+                                    )
+                                    .child("+F"),
+                            )
+                            .child(
+                                div()
+                                    .h(px(20.0))
+                                    .px_1()
+                                    .rounded_sm()
+                                    .text_color(colors.text)
+                                    .hover(|this| this.bg(colors.background))
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.create_directory_in_directory(
+                                                path_for_new_dir.clone(),
+                                                cx,
+                                            );
+                                        }),
+                                    )
+                                    .child("+D"),
+                            )
+                            .child(
+                                div()
+                                    .h(px(20.0))
+                                    .px_1()
+                                    .rounded_sm()
+                                    .text_color(colors.text_muted)
+                                    .hover(|this| this.bg(colors.background))
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.delete_tree_path(path_for_delete.clone(), cx);
+                                        }),
+                                    )
+                                    .child("×"),
+                            ),
                     )
                     .when(expanded, |this| {
                         this.children(children.iter().map(|child| {
@@ -1900,6 +2213,7 @@ impl DebateEditor {
             TreeEntry::File { name, path } => {
                 let selected = self.selected_file.as_ref() == Some(path);
                 let path_for_click = path.clone();
+                let path_for_delete = path.clone();
                 let name_for_drag = name.clone();
                 let drag_payload = DraggedTreeFile {
                     path: path.clone(),
@@ -1937,7 +2251,23 @@ impl DebateEditor {
                     } else {
                         colors.border
                     }))
-                    .child(name.clone())
+                    .child(div().flex_1().child(name.clone()))
+                    .child(
+                        div()
+                            .h(px(20.0))
+                            .px_1()
+                            .rounded_sm()
+                            .text_color(colors.text_muted)
+                            .hover(|this| this.bg(colors.background))
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.delete_tree_path(path_for_delete.clone(), cx);
+                                }),
+                            )
+                            .child("×"),
+                    )
                     .into_any_element()
             }
         }
@@ -2048,8 +2378,8 @@ impl DebateEditor {
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
-                            .bg(if self.render_active_styles.is_plain() {
-                                colors.background
+                            .bg(if self.cursor_has_style("normal") {
+                                colors.accent
                             } else {
                                 colors.surface_elevated
                             })
@@ -2070,8 +2400,8 @@ impl DebateEditor {
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
-                            .bg(if self.line_has_style("pocket") {
-                                colors.background
+                            .bg(if self.cursor_has_style("pocket") {
+                                colors.accent
                             } else {
                                 colors.surface_elevated
                             })
@@ -2092,8 +2422,8 @@ impl DebateEditor {
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
-                            .bg(if self.line_has_style("hat") {
-                                colors.background
+                            .bg(if self.cursor_has_style("hat") {
+                                colors.accent
                             } else {
                                 colors.surface_elevated
                             })
@@ -2114,8 +2444,8 @@ impl DebateEditor {
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
-                            .bg(if self.line_has_style("block") {
-                                colors.background
+                            .bg(if self.cursor_has_style("block") {
+                                colors.accent
                             } else {
                                 colors.surface_elevated
                             })
@@ -2136,8 +2466,8 @@ impl DebateEditor {
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
-                            .bg(if self.line_has_style("tag") {
-                                colors.background
+                            .bg(if self.cursor_has_style("tag") {
+                                colors.accent
                             } else {
                                 colors.surface_elevated
                             })
@@ -2158,8 +2488,8 @@ impl DebateEditor {
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
-                            .bg(if self.line_has_style("cite") {
-                                colors.background
+                            .bg(if self.cursor_has_style("cite") {
+                                colors.accent
                             } else {
                                 colors.surface_elevated
                             })
@@ -2180,11 +2510,15 @@ impl DebateEditor {
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
-                            .bg(if self.render_active_styles.highlight {
-                                colors.background
-                            } else {
-                                colors.surface_elevated
-                            })
+                            .bg(
+                                if self.cursor_has_style("highlight")
+                                    || self.render_active_styles.highlight
+                                {
+                                    colors.accent
+                                } else {
+                                    colors.surface_elevated
+                                },
+                            )
                             .text_size(px(11.0))
                             .cursor_pointer()
                             .hover(|style| style.bg(colors.background))
@@ -2205,11 +2539,15 @@ impl DebateEditor {
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
-                            .bg(if self.render_active_styles.emphasis {
-                                colors.background
-                            } else {
-                                colors.surface_elevated
-                            })
+                            .bg(
+                                if self.cursor_has_style("emphasis")
+                                    || self.render_active_styles.emphasis
+                                {
+                                    colors.accent
+                                } else {
+                                    colors.surface_elevated
+                                },
+                            )
                             .text_size(px(11.0))
                             .cursor_pointer()
                             .hover(|style| style.bg(colors.background))
@@ -2230,11 +2568,15 @@ impl DebateEditor {
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
-                            .bg(if self.render_active_styles.underline {
-                                colors.background
-                            } else {
-                                colors.surface_elevated
-                            })
+                            .bg(
+                                if self.cursor_has_style("underline")
+                                    || self.render_active_styles.underline
+                                {
+                                    colors.accent
+                                } else {
+                                    colors.surface_elevated
+                                },
+                            )
                             .text_size(px(11.0))
                             .cursor_pointer()
                             .hover(|style| style.bg(colors.background))
@@ -2255,11 +2597,15 @@ impl DebateEditor {
                             .rounded_sm()
                             .border_1()
                             .border_color(colors.border)
-                            .bg(if self.render_active_styles.shrunk {
-                                colors.background
-                            } else {
-                                colors.surface_elevated
-                            })
+                            .bg(
+                                if self.cursor_has_style("shrunk")
+                                    || self.render_active_styles.shrunk
+                                {
+                                    colors.accent
+                                } else {
+                                    colors.surface_elevated
+                                },
+                            )
                             .text_size(px(11.0))
                             .cursor_pointer()
                             .hover(|style| style.bg(colors.background))
@@ -2453,6 +2799,19 @@ impl DebateEditor {
             .text_color(colors.text)
             .font_family("Calibri")
             .text_size(px(11.0 * 1.33))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::start_render_end_mouse_selection),
+            )
+            .on_mouse_move(cx.listener(Self::update_render_end_mouse_selection))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(Self::finish_render_mouse_selection),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(Self::finish_render_mouse_selection),
+            )
             .children(
                 document
                     .parsed
@@ -2562,6 +2921,83 @@ impl DebateEditor {
                         colors,
                     )),
             )
+    }
+}
+
+fn word_range_at_column(text: &str, column: usize) -> (usize, usize) {
+    if text.is_empty() {
+        return (0, 0);
+    }
+
+    let column = column.min(text.len());
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let char_index = chars
+        .iter()
+        .position(|(byte, _)| *byte >= column)
+        .unwrap_or(chars.len().saturating_sub(1));
+    let char_index = if char_index > 0 && column == text.len() {
+        char_index.saturating_sub(1)
+    } else {
+        char_index
+    };
+
+    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    if !chars.get(char_index).is_some_and(|(_, ch)| is_word(*ch)) {
+        let start = chars.get(char_index).map_or(text.len(), |(byte, _)| *byte);
+        let end = chars
+            .get(char_index + 1)
+            .map_or(text.len(), |(byte, _)| *byte);
+        return (start, end);
+    }
+
+    let mut start_index = char_index;
+    while start_index > 0
+        && chars
+            .get(start_index - 1)
+            .is_some_and(|(_, ch)| is_word(*ch))
+    {
+        start_index -= 1;
+    }
+
+    let mut end_index = char_index + 1;
+    while end_index < chars.len() && chars.get(end_index).is_some_and(|(_, ch)| is_word(*ch)) {
+        end_index += 1;
+    }
+
+    let start = chars[start_index].0;
+    let end = chars.get(end_index).map_or(text.len(), |(byte, _)| *byte);
+    (start, end)
+}
+
+fn next_available_path(directory: &Path, base_name: &str, extension: &str) -> PathBuf {
+    let mut index = 0usize;
+    loop {
+        let suffix = if index == 0 {
+            String::new()
+        } else {
+            format!("_{}", index)
+        };
+        let candidate = directory.join(format!("{}{}.{}", base_name, suffix, extension));
+        if !candidate.exists() {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn next_available_folder_path(directory: &Path, base_name: &str) -> PathBuf {
+    let mut index = 0usize;
+    loop {
+        let suffix = if index == 0 {
+            String::new()
+        } else {
+            format!("_{}", index)
+        };
+        let candidate = directory.join(format!("{}{}", base_name, suffix));
+        if !candidate.exists() {
+            return candidate;
+        }
+        index += 1;
     }
 }
 
@@ -2876,6 +3312,119 @@ fn rendered_document_text(document: &Db8Document) -> String {
         .join("\n")
 }
 
+fn copy_rendered_range(document: &Db8Document, start: usize, end: usize) -> Option<Db8Document> {
+    let rendered_len = rendered_document_len(document);
+    let start = start.min(rendered_len);
+    let end = end.min(rendered_len);
+    if start >= end || document.blocks.is_empty() {
+        return None;
+    }
+
+    let start_cursor = rendered_global_offset_to_cursor(document, start);
+    let end_cursor = rendered_global_offset_to_cursor(document, end);
+    let start_line = start_cursor
+        .line
+        .min(document.blocks.len().saturating_sub(1));
+    let end_line = end_cursor.line.min(document.blocks.len().saturating_sub(1));
+    let mut blocks = Vec::new();
+
+    for line in start_line..=end_line {
+        let block = &document.blocks[line];
+        let line_len = rendered_line_text(block).len();
+        let local_start = if line == start_line {
+            start_cursor.column
+        } else {
+            0
+        };
+        let local_end = if line == end_line {
+            end_cursor.column
+        } else {
+            line_len
+        };
+        let (_, rest) = split_spans_at(&block.spans, local_start);
+        let (spans, _) = split_spans_at(&rest, local_end.saturating_sub(local_start));
+        blocks.push(Db8Block {
+            source_line: blocks.len(),
+            style: block.style,
+            spans: normalize_spans(spans),
+        });
+    }
+
+    Some(Db8Document { version: 1, blocks })
+}
+
+fn insert_rendered_fragment(
+    document: &mut Db8Document,
+    cursor: RawCursor,
+    fragment: &Db8Document,
+) -> RawCursor {
+    if fragment.blocks.is_empty() {
+        return cursor;
+    }
+
+    if document.blocks.is_empty() {
+        *document = Db8Document::empty();
+    }
+
+    let line = cursor.line.min(document.blocks.len().saturating_sub(1));
+    let column = cursor.column.min(
+        document
+            .blocks
+            .get(line)
+            .map(rendered_line_text)
+            .map_or(0, |text| text.len()),
+    );
+    let (mut left, right) = split_spans_at(&document.blocks[line].spans, column);
+
+    if fragment.blocks.len() == 1 {
+        document.blocks[line].style = fragment.blocks[0].style;
+        left.extend(fragment.blocks[0].spans.clone());
+        left.extend(right);
+        document.blocks[line].spans = normalize_spans(left);
+        return RawCursor {
+            line,
+            column: column + rendered_line_text(&fragment.blocks[0]).len(),
+        };
+    }
+
+    left.extend(fragment.blocks[0].spans.clone());
+    document.blocks[line].spans = normalize_spans(left);
+
+    let mut insert_at = line + 1;
+    for block in fragment
+        .blocks
+        .iter()
+        .skip(1)
+        .take(fragment.blocks.len().saturating_sub(2))
+    {
+        let mut block = block.clone();
+        block.source_line = insert_at;
+        document.blocks.insert(insert_at, block);
+        insert_at += 1;
+    }
+
+    let last = fragment.blocks.last().cloned().unwrap();
+    let mut last_spans = last.spans;
+    last_spans.extend(right);
+    document.blocks.insert(
+        insert_at,
+        Db8Block {
+            source_line: insert_at,
+            style: last.style,
+            spans: normalize_spans(last_spans),
+        },
+    );
+
+    for (idx, block) in document.blocks.iter_mut().enumerate() {
+        block.source_line = idx;
+    }
+
+    RawCursor {
+        line: insert_at,
+        column: rendered_line_text(&fragment.blocks.last().unwrap()).len(),
+    }
+}
+
 fn insert_rendered_text(
     document: &mut Db8Document,
     cursor: RawCursor,
@@ -2933,7 +3482,7 @@ fn insert_rendered_text(
             insert_at,
             Db8Block {
                 source_line: insert_at,
-                style: document.blocks[line].style,
+                style: BlockStyle::Normal,
                 spans: normalize_spans(vec![Db8Span {
                     text: (*middle).to_string(),
                     styles,
@@ -2956,7 +3505,7 @@ fn insert_rendered_text(
         insert_at,
         Db8Block {
             source_line: insert_at,
-            style: document.blocks[line].style,
+            style: BlockStyle::Normal,
             spans: normalize_spans(last_spans),
         },
     );
@@ -3019,11 +3568,39 @@ fn delete_from_spans(spans: &[Db8Span], start: usize, end: usize) -> Vec<Db8Span
     normalize_spans(left.into_iter().chain(right).collect())
 }
 
+fn rendered_range_has_inline_style(
+    document: &Db8Document,
+    start: usize,
+    end: usize,
+    style_token: &str,
+) -> bool {
+    copy_rendered_range(document, start, end).is_some_and(|fragment| {
+        let mut saw_text = false;
+        let all_styled = fragment
+            .blocks
+            .iter()
+            .flat_map(|block| &block.spans)
+            .filter(|span| !span.text.is_empty())
+            .all(|span| {
+                saw_text = true;
+                match style_token {
+                    "highlight" => span.styles.highlight,
+                    "emphasis" => span.styles.emphasis,
+                    "underline" => span.styles.underline,
+                    "shrunk" => span.styles.shrunk,
+                    _ => false,
+                }
+            });
+        saw_text && all_styled
+    })
+}
+
 fn apply_inline_style_to_rendered_range(
     document: &mut Db8Document,
     start: usize,
     end: usize,
     style_token: &str,
+    enabled: bool,
 ) -> bool {
     if start >= end || document.blocks.is_empty() {
         return false;
@@ -3055,7 +3632,8 @@ fn apply_inline_style_to_rendered_range(
         if local_start < local_end
             && let Some(block) = document.blocks.get_mut(line)
         {
-            block.spans = apply_style_to_spans(&block.spans, local_start, local_end, style_token);
+            block.spans =
+                apply_style_to_spans(&block.spans, local_start, local_end, style_token, enabled);
         }
     }
 
@@ -3067,21 +3645,22 @@ fn apply_style_to_spans(
     start: usize,
     end: usize,
     style_token: &str,
+    enabled: bool,
 ) -> Vec<Db8Span> {
     let (left, rest) = split_spans_at(spans, start);
     let (mut middle, right) = split_spans_at(&rest, end.saturating_sub(start));
     for span in &mut middle {
-        set_inline_style(&mut span.styles, style_token);
+        set_inline_style(&mut span.styles, style_token, enabled);
     }
     normalize_spans(left.into_iter().chain(middle).chain(right).collect())
 }
 
-fn set_inline_style(styles: &mut StyleSet, style_token: &str) {
+fn set_inline_style(styles: &mut StyleSet, style_token: &str, enabled: bool) {
     match style_token {
-        "highlight" => styles.highlight = true,
-        "emphasis" => styles.emphasis = true,
-        "underline" => styles.underline = true,
-        "shrunk" => styles.shrunk = true,
+        "highlight" => styles.highlight = enabled,
+        "emphasis" => styles.emphasis = enabled,
+        "underline" => styles.underline = enabled,
+        "shrunk" => styles.shrunk = enabled,
         _ => {}
     }
 }
@@ -3167,13 +3746,24 @@ fn render_line_mouse_column(
     block: &Db8Block,
     mouse_x: f32,
     sidebar_open: bool,
+    viewport_width: f32,
     style_config: &Db8StyleConfig,
 ) -> usize {
     const SIDEBAR_WIDTH: f32 = 240.0;
     const EDITOR_PADDING_X: f32 = 16.0;
 
     let document_left = if sidebar_open { SIDEBAR_WIDTH } else { 0.0 };
-    let text_left = document_left + EDITOR_PADDING_X;
+    let editor_width = (viewport_width - document_left - EDITOR_PADDING_X * 2.0).max(0.0);
+    let text_width = rendered_block_width(block, style_config);
+    let centered_offset = if matches!(
+        block.style,
+        BlockStyle::Pocket | BlockStyle::Hat | BlockStyle::Block
+    ) {
+        ((editor_width - text_width) / 2.0).max(0.0)
+    } else {
+        0.0
+    };
+    let text_left = document_left + EDITOR_PADDING_X + centered_offset;
     let target_x = mouse_x - text_left;
     if target_x <= 0.0 {
         return 0;
@@ -3207,6 +3797,31 @@ fn render_line_mouse_column(
     }
 
     column
+}
+
+fn rendered_block_width(block: &Db8Block, style_config: &Db8StyleConfig) -> f32 {
+    block
+        .spans
+        .iter()
+        .map(|span| {
+            let effective_styles = block_style_to_styles(block.style, span.styles);
+            let font_px = rendered_span_font_size_px(effective_styles, style_config);
+            let weight_factor = if effective_styles.pocket
+                || effective_styles.hat
+                || effective_styles.block
+                || effective_styles.tag
+                || effective_styles.emphasis
+            {
+                1.08
+            } else {
+                1.0
+            };
+            span.text
+                .chars()
+                .map(|ch| approximate_calibri_char_width(ch, font_px) * weight_factor)
+                .sum::<f32>()
+        })
+        .sum()
 }
 
 fn rendered_span_font_size_px(styles: StyleSet, style_config: &Db8StyleConfig) -> f32 {
@@ -3246,6 +3861,17 @@ fn approximate_calibri_char_width(ch: char, font_px: f32) -> f32 {
 
 fn is_line_semantic_style(style_token: &str) -> bool {
     matches!(style_token, "pocket" | "hat" | "block" | "tag" | "cite")
+}
+
+fn block_style_from_token(style_token: &str) -> BlockStyle {
+    match style_token {
+        "pocket" => BlockStyle::Pocket,
+        "hat" => BlockStyle::Hat,
+        "block" => BlockStyle::Block,
+        "tag" => BlockStyle::Tag,
+        "cite" => BlockStyle::Cite,
+        _ => BlockStyle::Normal,
+    }
 }
 
 fn clear_primary_semantic_styles(styles: &mut StyleSet) {
